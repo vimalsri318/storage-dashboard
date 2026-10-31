@@ -1,7 +1,7 @@
 'use strict';
 /* Storage dashboard front-end. No libraries. All text goes through textContent (file names are untrusted). */
 const TOKEN = window.__TOKEN__;
-const S = { st: null, page: 'overview', filter: 'all', sel: new Set(), dir: null, dirPath: null, range: '7d', loadingDir: false };
+const S = { st: null, page: 'overview', filter: 'all', sel: new Set(), dir: null, dirPath: null, range: '7d', loadingDir: false, busy: new Set(), hoverCat: null };
 
 /* ---------- helpers ---------- */
 function h(tag, attrs, ...kids) {
@@ -14,17 +14,19 @@ function h(tag, attrs, ...kids) {
   for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
-const svg = (inner, cls = 'ico', vb = '0 0 24 24') => h('span', { html: `<svg class="${cls}" viewBox="${vb}">${inner}</svg>`, style: 'display:inline-flex' }).firstChild;
+const svg = (inner, cls = 'ico') => { const t = document.createElement('template'); t.innerHTML = `<svg class="${cls}" viewBox="0 0 24 24">${inner}</svg>`; return t.content.firstChild; };
 const ICON = {
   home: '<path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/>', broom: '<path d="M14 4l6 6M4 20l6-1 9-9-5-5-9 9-1 6zM8 16l2 2"/>', folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
   chart: '<path d="M4 19V5M4 19h16M8 15l4-5 3 3 5-7"/>', file: '<path d="M7 3h7l5 5v13H7zM14 3v5h5"/>', reveal: '<path d="M10 14L21 3M21 3h-6M21 3v6M19 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h5"/>',
-  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', refresh: '<path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', list: '<path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/>', moon: '<path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z"/>',
+  auto: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/>',
 };
 const icon = n => svg(ICON[n]);
 const gb = kb => kb * 1024 / 1e9; // macOS style: 1 GB = 1,000,000,000 bytes
 function fmt(kb) {
-  const g = gb(kb);
   if (!kb) return '0 KB';
+  const g = gb(kb);
   if (g >= 100) return Math.round(g) + ' GB'; if (g >= 1) return g.toFixed(1) + ' GB';
   const m = g * 1000; if (m >= 1) return Math.round(m) + ' MB'; return Math.max(1, Math.round(kb)) + ' KB';
 }
@@ -37,95 +39,232 @@ async function post(p, b) {
   const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j;
 }
 function toast(msg, ms = 3200) { const t = document.getElementById('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, ms); }
+const copy = async txt => { try { await navigator.clipboard.writeText(txt); toast('Copied: ' + txt); } catch { toast('Copy failed — select it manually'); } };
+
+/* ---------- theme (Auto / Light / Dark) ---------- */
+function getTheme() { try { return localStorage.getItem('sd-theme') || 'auto'; } catch { return 'auto'; } }
+function setTheme(t) {
+  try { localStorage.setItem('sd-theme', t); } catch { /* private mode */ }
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;
+  renderShell();
+}
+setTheme(getTheme());
 
 /* ---------- derived data ---------- */
 const sugs = () => S.st?.suggestions || [];
+const tasks = () => S.st?.tasks || [];
 const safeKB = () => sugs().filter(s => s.risk === 'safe').reduce((a, s) => a + s.kb, 0);
 const reviewKB = () => sugs().filter(s => s.risk === 'review' && s.method !== 'emptytrash').reduce((a, s) => a + s.kb, 0);
 const freedKB = () => (S.st?.actions || []).filter(a => a.how === 'rm').reduce((a, x) => a + x.kb, 0);
+const doneToday = () => (S.st?.completed || []).filter(c => Date.now() - c.t < 864e5);
 function alerts() {
   const d = S.st.disk, pct = d.used / d.total * 100, out = [];
-  if (pct >= 90) out.push({ lvl: 'crit', t: `Your disk is ${pct.toFixed(0)}% full`, d: `Only ${fmtB(d.free)} left. macOS slows down and updates can fail below ~10%.` });
-  else if (pct >= 80) out.push({ lvl: 'warn', t: `Disk is ${pct.toFixed(0)}% full`, d: `${fmtB(d.free)} free. A good time to clear some space.` });
+  if (pct >= 90) out.push({ lvl: 'crit', t: `Your disk is ${pct.toFixed(0)}% full`, d: `Only ${fmtB(d.free)} left. macOS slows down and updates can fail below ~10%.`, cta: true });
+  else if (pct >= 80) out.push({ lvl: 'warn', t: `Disk is ${pct.toFixed(0)}% full`, d: `${fmtB(d.free)} free. A good time to clear some space.`, cta: true });
   const hs = S.st.history, now = Date.now(), old = hs.find(x => x.t >= now - 36 * 36e5);
   if (old && old.free - d.free > 5e9) out.push({ lvl: 'warn', t: `Free space dropped ${fmtB(old.free - d.free)} in the last day`, d: 'Something is growing quickly — check the Explorer for the biggest folders.' });
-  const s = safeKB();
-  if (s > 2e6 && !out.length) out.push({ lvl: 'ok', t: `${fmt(s)} can be cleaned safely right now`, d: 'Caches and build folders that regenerate on their own.', cta: true });
   return out;
 }
 
 /* ---------- shell ---------- */
-const NAV = [['overview', 'Overview', 'home'], ['cleanup', 'Cleanup', 'broom'], ['explorer', 'Explorer', 'folder'], ['history', 'History', 'chart']];
+const NAV = [['overview', 'Overview', 'home'], ['tasks', 'Checklist', 'list'], ['cleanup', 'Cleanup', 'broom'], ['explorer', 'Explorer', 'folder'], ['history', 'History', 'chart']];
 function renderShell() {
   const nav = document.getElementById('nav'); nav.replaceChildren();
+  if (!S.st) return;
   NAV.forEach(([id, label, ic]) => {
-    const n = sugs().length;
-    nav.append(h('button', { class: 'nav-item' + (S.page === id ? ' active' : ''), onclick: () => go(id) }, icon(ic), label,
-      id === 'cleanup' && n ? h('span', { class: 'pill' }, n) : null));
+    const n = id === 'tasks' ? tasks().length : id === 'cleanup' ? sugs().length : 0;
+    nav.append(h('button', { class: 'nav-item' + (S.page === id ? ' active' : ''), onclick: () => go(id) }, icon(ic), label, n ? h('span', { class: 'pill' }, n) : null));
   });
   const sc = S.st.scan, f = document.getElementById('sideFoot'); f.replaceChildren();
   if (sc.running) f.append(h('b', null, 'Scanning…'), sc.phase, h('div', { class: 'progress' }, h('i', { style: `width:${Math.round(sc.progress * 100)}%` })));
   else f.append(h('b', null, sc.finishedAt ? 'Up to date' : 'Not scanned yet'), sc.finishedAt ? 'Last scan ' + ago(sc.finishedAt) : 'Run a scan to begin',
-    h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn ghost sm', onclick: startScan }, 'Rescan')));
+    h('div', { style: 'margin:10px 0 12px' }, h('button', { class: 'btn ghost sm', onclick: startScan }, 'Rescan')));
+  const t = getTheme();
+  f.append(h('div', { class: 'theme', role: 'group', 'aria-label': 'Theme' }, [['auto', 'auto', 'Match system'], ['light', 'sun', 'Light'], ['dark', 'moon', 'Dark']].map(([k, ic, tip]) =>
+    h('button', { class: t === k ? 'on' : '', title: tip, 'aria-label': tip, onclick: () => setTheme(k) }, icon(ic)))));
 }
-function go(p) { S.page = p; if (p === 'explorer' && !S.dirPath) loadDir(S.st.home); render(); location.hash = p; window.scrollTo(0, 0); }
+function go(p) { S.page = p; if (p === 'explorer' && !S.dirPath) loadDir(S.st.home); render({ anim: true, top: true }); history.replaceState(null, '', '#' + p); }
 async function startScan() { try { await post('/api/scan'); S.st.scan.running = true; S.st.scan.phase = 'Starting…'; S.st.scan.progress = 0.02; render(); poll(); } catch (e) { toast(e.message); } }
 
 function header(title, sub, right) {
   return h('div', { class: 'head' }, h('div', null, h('h1', null, title), sub ? h('div', { class: 'sub' }, sub) : null), right || null);
 }
 function scanBtn() { return S.st.scan.running ? h('span', { class: 'muted small' }, h('span', { class: 'spin' }), '  ', S.st.scan.phase) : h('button', { class: 'btn', onclick: startScan }, 'Rescan'); }
+const emptyScan = () => h('div', { class: 'empty' }, S.st.scan.running ? [h('span', { class: 'spin' }), h('div', { style: 'margin-top:12px' }, 'Scanning your Mac for the first time…')] : [h('b', null, 'No scan yet'), h('button', { class: 'btn', style: 'margin-top:12px', onclick: startScan }, 'Scan now')]);
+const cardHead = (title, right) => h('div', { class: 'card-head' }, h('h2', null, title), right || null);
 
-/* ---------- Overview ---------- */
+/* ---------- charts ---------- */
 function ring(d) {
   const R = 100, C = 2 * Math.PI * R, pct = d.used / d.total;
   const col = pct >= .9 ? 'var(--red)' : pct >= .8 ? 'var(--orange)' : 'var(--primary)';
   const wrap = h('div', { class: 'ring' });
   wrap.innerHTML = `<svg viewBox="0 0 230 230"><circle cx="115" cy="115" r="${R}" fill="none" stroke="var(--line)" stroke-width="18"/>
-    <circle id="rg" cx="115" cy="115" r="${R}" fill="none" stroke="${col}" stroke-width="18" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C}" style="transition:stroke-dashoffset 1.1s cubic-bezier(.2,.8,.2,1)"/></svg>`;
+    <circle class="rg" cx="115" cy="115" r="${R}" fill="none" stroke="${col}" stroke-width="18" stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C}" style="transition:stroke-dashoffset 1.1s cubic-bezier(.2,.8,.2,1)"/></svg>`;
   wrap.append(h('div', { class: 'c' }, h('div', { class: 'big' }, fmtB(d.free)), h('div', { class: 'lbl' }, 'free of ' + fmtB(d.total))));
-  requestAnimationFrame(() => requestAnimationFrame(() => { const c = wrap.querySelector('#rg'); if (c) c.style.strokeDashoffset = C * (1 - pct); }));
+  requestAnimationFrame(() => requestAnimationFrame(() => { const c = wrap.querySelector('.rg'); if (c) c.style.strokeDashoffset = C * (1 - pct); }));
   return wrap;
 }
-function pageOverview() {
-  const d = S.st.disk, cats = S.st.categories, tot = cats.reduce((a, c) => a + c.kb, 0) || 1;
-  const root = h('div');
-  root.append(header('Storage', `${S.st.home.split('/').pop()}’s Mac · ${(d.used / d.total * 100).toFixed(0)}% used`, scanBtn()));
-  alerts().forEach(a => root.append(h('div', { class: 'banner ' + a.lvl }, h('span', { class: 'dot', style: `background:${a.lvl === 'crit' ? 'var(--red)' : a.lvl === 'warn' ? 'var(--orange)' : 'var(--primary)'}` }),
-    h('div', { class: 'grow' }, h('b', null, a.t), h('div', { class: 'small muted' }, a.d)), a.cta ? h('button', { class: 'btn sm', onclick: () => go('cleanup') }, 'Review') : null)));
-
-  const hero = h('div', { class: 'card' }, h('div', { class: 'hero' }, ring(d), h('div', null,
-    h('div', { class: 'card-head' }, h('h2', null, 'Where your space goes'), h('span', { class: 'muted small' }, 'Click a row to explore')),
-    h('div', { class: 'segbar' }, cats.filter(c => c.kb > 0).map(c => h('i', { style: `flex:${c.kb};background:${c.color}`, title: `${c.name} · ${fmt(c.kb)}` }))),
-    h('div', { class: 'legend' }, cats.filter(c => c.kb > 0).sort((a, b) => b.kb - a.kb).map(c =>
-      h('div', { class: 'legend-row', style: 'cursor:pointer', onclick: () => { S.dirPath = null; go('explorer'); } },
-        h('span', { class: 'dot', style: `background:${c.color}` }), c.name, h('span', { class: 'num' }, fmt(c.kb)), h('span', { class: 'pct' }, (c.kb / tot * 100).toFixed(0) + '%')))))));
-  root.append(hero);
-
-  root.append(h('div', { class: 'grid g3', style: 'margin-top:20px' },
-    stat('Safe to clean', fmt(safeKB()), `${sugs().filter(s => s.risk === 'safe').length} items that rebuild themselves`, 'var(--primary)', () => { S.filter = 'safe'; go('cleanup'); }),
-    stat('Needs your review', fmt(reviewKB()), `${sugs().filter(s => s.risk === 'review' && s.method !== 'emptytrash').length} items only you can judge`, 'var(--orange)', () => { S.filter = 'review'; go('cleanup'); }),
-    stat('Freed with this app', fmt(freedKB()), `${(S.st.actions || []).length} cleanups so far`, 'var(--blue)', () => go('history'))));
-
-  const top = S.st.top.slice(0, 10), mx = top[0]?.kb || 1, cmap = Object.fromEntries(cats.map(c => [c.name, c.color]));
-  const left = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Biggest space users'), h('span', { class: 'muted small' }, 'Top 10 folders')),
-    top.length ? h('div', { class: 'list' }, top.map(t => h('div', { class: 'row click', onclick: () => { loadDir(t.path); go('explorer'); } },
-      h('div', { class: 'bar-row' }, h('div', { class: 'name' }, h('span', null, t.name), h('span', { class: 'chip' }, t.category)), h('span', { class: 'num' }, fmt(t.kb)),
-        h('div', { class: 'track' }, h('i', { style: `width:${t.kb / mx * 100}%;background:${cmap[t.category] || 'var(--primary)'}` })))))) : emptyScan());
-  const sg = sugs().slice(0, 5);
-  const right = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Suggested for you'), h('button', { class: 'btn ghost sm', onclick: () => go('cleanup') }, 'See all')),
-    sg.length ? h('div', { class: 'list' }, sg.map(s => h('div', { class: 'row' }, h('div', null, h('div', { style: 'font-weight:600' }, s.title, ' ', h('span', { class: 'chip ' + s.risk }, s.risk === 'safe' ? 'Safe' : 'Review')),
-      h('div', { class: 'small muted', style: 'margin-top:2px' }, s.reason)), h('span', { class: 'num' }, fmt(s.kb))))) : h('div', { class: 'empty' }, h('b', null, 'Nothing to suggest'), 'Your Mac looks tidy.'));
-  root.append(h('div', { class: 'grid g2', style: 'margin-top:20px' }, left, right));
-  return root;
+function donut(cats) {
+  const tot = cats.reduce((a, c) => a + c.kb, 0) || 1, R = 84, C = 2 * Math.PI * R, gap = 3;
+  const wrap = h('div', { class: 'donut' }), center = h('div', { class: 'c' }, h('b', null, fmt(tot)), h('span', null, 'in your home & apps'));
+  let off = 0, html = `<svg viewBox="0 0 220 220"><circle cx="110" cy="110" r="${R}" fill="none" stroke="var(--line)" stroke-width="26"/>`;
+  cats.forEach((c, i) => { const len = Math.max(0, c.kb / tot * C - gap); html += `<circle class="seg" data-i="${i}" cx="110" cy="110" r="${R}" stroke="${c.color}" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}"/>`; off += c.kb / tot * C; });
+  wrap.innerHTML = html + '</svg>'; wrap.append(center);
+  const set = i => {
+    S.hoverCat = i; wrap.classList.toggle('hov', i != null);
+    wrap.querySelectorAll('.seg').forEach(e => e.classList.toggle('on', +e.dataset.i === i));
+    document.querySelectorAll('.legend-row[data-i]').forEach(e => e.classList.toggle('on', +e.dataset.i === i));
+    center.replaceChildren(...(i == null ? [h('b', null, fmt(tot)), h('span', null, 'in your home & apps')] : [h('b', null, fmt(cats[i].kb)), h('span', null, cats[i].name + ' · ' + (cats[i].kb / tot * 100).toFixed(0) + '%')]));
+  };
+  wrap.addEventListener('mouseover', e => { const t = e.target.closest('.seg'); if (t) set(+t.dataset.i); });
+  wrap.addEventListener('mouseleave', () => set(null)); wrap.set = set;
+  return wrap;
 }
-const stat = (k, v, d, c, fn) => { const [n, u] = v.split(' '); return h('div', { class: 'card stat', style: fn ? 'cursor:pointer' : '', onclick: fn },
-  h('div', { class: 'k' }, h('span', { class: 'dot', style: `background:${c}` }), k), h('div', { class: 'v' }, n, h('small', null, ' ' + u)), h('div', { class: 'd' }, d)); };
-const emptyScan = () => h('div', { class: 'empty' }, S.st.scan.running ? [h('span', { class: 'spin' }), h('div', { style: 'margin-top:12px' }, 'Scanning your Mac for the first time…')] : [h('b', null, 'No scan yet'), h('button', { class: 'btn', style: 'margin-top:12px', onclick: startScan }, 'Scan now')]);
-
-/* ---------- Cleanup ---------- */
+function trendChart(data, tip, H = 280) {
+  const W = 1000, P = { l: 52, r: 16, t: 14, b: 28 }, t0 = data[0].t, t1 = data[data.length - 1].t;
+  const vals = data.map(d => d.free / 1e9), lo = Math.max(0, Math.min(...vals) * .9), hi = Math.max(...vals) * 1.08 + .1;
+  const X = t => P.l + (t - t0) / ((t1 - t0) || 1) * (W - P.l - P.r), Y = v => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
+  const pts = data.map(d => [X(d.t), Y(d.free / 1e9)]), line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const el = h('div'); let grid = '';
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4, y = Y(v); grid += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${P.l - 10}" y="${y + 4}" text-anchor="end">${Math.round(v)} GB</text>`; }
+  const fm = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + (t1 - t0 < 2 * 864e5 ? ' ' + new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+  const id = 'ar' + Math.random().toString(36).slice(2, 7);
+  el.innerHTML = `<svg class="chart" style="height:${H}px" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--primary)" stop-opacity=".28"/><stop offset="1" stop-color="var(--primary)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<path d="${line} L${pts[pts.length - 1][0]} ${H - P.b} L${pts[0][0]} ${H - P.b} Z" fill="url(#${id})"/><path d="${line}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+    <text x="${P.l}" y="${H - 6}">${fm(t0)}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end">${fm(t1)}</text><circle class="cur" r="5" fill="var(--primary)" stroke="var(--surface)" stroke-width="2.5" display="none"/></svg>`;
+  const s = el.firstChild, cur = s.querySelector('.cur');
+  s.addEventListener('mousemove', e => {
+    const r = s.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * W; let best = 0;
+    pts.forEach((p, i) => { if (Math.abs(p[0] - x) < Math.abs(pts[best][0] - x)) best = i; });
+    const p = pts[best]; cur.setAttribute('cx', p[0]); cur.setAttribute('cy', p[1]); cur.setAttribute('display', 'block');
+    tip.hidden = false; tip.style.left = (p[0] / W * r.width) + 'px'; tip.style.top = (p[1] / H * r.height + 64) + 'px';
+    tip.replaceChildren(h('b', null, fmtB(data[best].free) + ' free'), h('div', { class: 'muted' }, new Date(data[best].t).toLocaleString()));
+  });
+  s.addEventListener('mouseleave', () => { tip.hidden = true; cur.setAttribute('display', 'none'); });
+  return el;
+}
+function trendCard(range, H, title) {
+  const hs = S.st.history, now = Date.now(), span = { '24h': 864e5, '7d': 7 * 864e5, '30d': 30 * 864e5, all: Infinity }[range];
+  const data = hs.filter(x => now - x.t <= span); if (data.length === 1) data.unshift({ ...data[0], t: data[0].t - 6e4 });
+  const delta = data.length > 1 ? data[data.length - 1].free - data[0].free : 0;
+  const badge = data.length > 1 ? h('span', { class: 'delta ' + (Math.abs(delta) < 2e8 ? 'flat' : delta > 0 ? 'up' : 'down') }, (delta > 0 ? '+' : delta < 0 ? '−' : '') + fmtB(Math.abs(delta)) + ' · ' + range) : null;
+  const card = h('div', { class: 'card', style: 'position:relative' }, cardHead(title, badge));
+  if (data.length < 2) card.append(h('div', { class: 'center muted small', style: 'text-align:center;padding:30px 0' }, 'Collecting data — leave the app running and a trend appears here.'));
+  else { const tip = h('div', { class: 'tip', hidden: true }); card.append(h('div', { class: 'card-body' }, trendChart(data, tip, H)), tip); }
+  return card;
+}
 const GROUPS = [['dev', 'Project build folders', 'node_modules, build caches and virtualenvs inside your projects'], ['cache', 'Caches & developer tools', 'Things apps and tools download for speed'],
   ['downloads', 'Old installers & downloads', 'Setup files you probably don’t need any more'], ['large', 'Large files', 'Big files in Downloads, Desktop and Documents'], ['trash', 'Trash', 'Already deleted, still using space']];
+function reclaimCard() {
+  const rows = GROUPS.map(([g, t]) => { const it = sugs().filter(s => s.group === g); return { t, safe: it.filter(s => s.risk === 'safe').reduce((a, s) => a + s.kb, 0), rev: it.filter(s => s.risk === 'review').reduce((a, s) => a + s.kb, 0) }; }).filter(r => r.safe + r.rev > 0);
+  const mx = Math.max(1, ...rows.map(r => r.safe + r.rev));
+  return h('div', { class: 'card' }, cardHead('What can be reclaimed', h('span', { class: 'muted small' }, 'by type')),
+    h('div', { class: 'card-body' }, rows.length ? rows.map(r => h('div', { class: 'gbar' }, h('span', null, r.t.replace('Project build folders', 'Build folders').replace('Caches & developer tools', 'Caches').replace('Old installers & downloads', 'Installers')),
+      h('div', { class: 'stk', style: `width:${(r.safe + r.rev) / mx * 100}%` }, r.safe ? h('i', { style: `flex:${r.safe};background:var(--primary)` }) : null, r.rev ? h('i', { style: `flex:${r.rev};background:var(--orange)` }) : null),
+      h('span', { class: 'num', style: 'text-align:right' }, fmt(r.safe + r.rev)))) : h('div', { class: 'muted small center' }, 'Nothing to reclaim right now.')),
+    h('div', { class: 'mini-legend' }, h('span', null, h('i', { class: 'dot', style: 'background:var(--primary)' }), 'Safe'), h('span', null, h('i', { class: 'dot', style: 'background:var(--orange)' }), 'Needs your review')));
+}
+
+/* ---------- checklist ---------- */
+function planProgress() {
+  const open = tasks(), done = doneToday(), doneKB = done.reduce((a, c) => a + (c.kb || 0), 0), openKB = open.reduce((a, t) => a + (t.kb || 0), 0);
+  const total = open.length + done.length;
+  return { open, done, doneKB, openKB, pct: total ? done.length / total : 0 };
+}
+function taskRow(t) {
+  const busy = S.busy.has(t.id), cb = h('input', { type: 'checkbox', class: 'circle', 'aria-label': 'Complete task', disabled: busy, onchange: e => { e.target.checked = false; primary(t); } });
+  const acts = h('div', { class: 'acts' });
+  if (busy) acts.append(h('span', { class: 'muted small' }, h('span', { class: 'spin' }), '  Working…'));
+  else if (t.type === 'auto') acts.append(h('button', { class: 'btn sm', onclick: () => primary(t) }, 'Clean up'));
+  else if (t.type === 'review') acts.append(h('button', { class: 'btn ghost sm', onclick: () => keepTask(t) }, 'Keep'), h('button', { class: 'btn sm' + (t.method === 'trash' ? '' : ''), onclick: () => primary(t) }, t.method === 'trash' ? 'Move to Trash' : 'Remove'));
+  else if (t.type === 'manual') { if (t.run) acts.append(h('button', { class: 'btn sm', onclick: () => primary(t) }, 'Run it')); else acts.append(h('button', { class: 'btn sm', onclick: () => copy(t.command) }, 'Copy command')); acts.append(h('button', { class: 'btn ghost sm', onclick: () => markDone(t) }, 'I did it')); }
+  else if (t.type === 'open') acts.append(h('button', { class: 'btn sm', onclick: () => primary(t) }, 'Open folder'), h('button', { class: 'btn ghost sm', onclick: () => markDone(t) }, 'Done'));
+  if (t.path && !busy) acts.append(h('button', { class: 'icon-btn', title: 'Show in Finder', onclick: () => post('/api/reveal', { path: t.path }) }, icon('reveal')));
+  return h('div', { class: 'task' }, cb,
+    h('div', { style: 'min-width:0' }, h('div', { class: 't' }, t.title), h('div', { class: 'd' }, t.detail),
+      h('div', { class: 'meta' }, h('span', { class: 'chip ' + t.risk }, t.risk === 'safe' ? 'Safe' : 'Review'), h('span', { class: 'chip' }, t.effort), t.command ? h('span', { class: 'cmd' }, '$ ' + t.command) : null,
+        t.undo ? h('span', { class: 'u' }, '↺ ' + t.undo) : null)),
+    h('div', { class: 'gain' }, t.kb ? ['+' + fmt(t.kb), h('small', null, 'free')] : h('span', { class: 'muted small' }, 'varies')), acts);
+}
+function primary(t) {
+  if (t.type === 'auto') return runClean(t, 'trash');
+  if (t.type === 'review') { const picked = sugs().filter(s => t.sids.includes(s.id)); return picked.length ? confirmClean(picked, { taskId: t.id, taskTitle: t.title }) : refresh(true); }
+  if (t.type === 'manual' && t.run) return runCommand(t);
+  if (t.type === 'open') { loadDir(t.path); go('explorer'); }
+}
+async function runClean(t, mode) {
+  S.busy.add(t.id); render();
+  try {
+    const r = await post('/api/clean', { ids: t.sids, mode, taskId: t.id, taskTitle: t.title });
+    const bad = r.results.filter(x => !x.ok);
+    toast(bad.length ? `Some items failed: ${bad[0].error}` : `Done — freed ${fmt(r.freedKB)}`, 4500);
+  } catch (e) { toast(e.message); }
+  S.busy.delete(t.id); await refresh(true);
+}
+async function runCommand(t) {
+  S.busy.add(t.id); render();
+  try { const r = await post('/api/run', { key: t.run, taskId: t.id, title: t.title }); toast(r.freedKB ? `Done — freed ${fmt(r.freedKB)}` : 'Done — nothing noticeable to free', 4500); }
+  catch (e) { toast(e.message, 6000); }
+  S.busy.delete(t.id); await refresh(true);
+}
+async function markDone(t) { try { await post('/api/task', { id: t.id, action: 'done', title: t.title, kb: 0 }); toast('Marked as done'); } catch (e) { toast(e.message); } await refresh(true); }
+async function keepTask(t) { try { await post('/api/task', { id: t.id, action: 'keep' }); toast('Okay — we won’t suggest it again'); } catch (e) { toast(e.message); } await refresh(true); }
+function planCard(limit) {
+  const p = planProgress(), list = limit ? p.open.slice(0, limit) : p.open;
+  const head = h('div', { class: 'plan-head' }, h('div', { class: 'meter' }, h('i', { style: `width:${Math.round(p.pct * 100)}%` })),
+    h('span', { class: 'small muted', style: 'white-space:nowrap' }, `${p.done.length} of ${p.open.length + p.done.length} done · ${fmt(p.doneKB)} freed today`));
+  const card = h('div', { class: 'card' }, cardHead(limit ? 'Your plan for today' : 'To do', limit ? h('button', { class: 'btn ghost sm', onclick: () => go('tasks') }, 'See all ' + p.open.length) : h('span', { class: 'muted small' }, `${fmt(p.openKB)} available`)), head,
+    h('div', { class: 'card-body' }, list.length ? h('div', { class: 'tasks' }, list.map(taskRow)) : h('div', { class: 'empty' }, h('b', null, 'All clear 🎉'), 'Nothing left to do. We’ll add tasks here as your disk fills up again.')));
+  return card;
+}
+function pageTasks() {
+  const root = h('div'), p = planProgress();
+  root.append(header('Checklist', `${p.open.length} small tasks · ${fmt(p.openKB)} you can free`, scanBtn()));
+  root.append(h('div', { class: 'grid' }, h('div', { class: 's12' }, planCard(0))));
+  if (p.done.length || (S.st.completed || []).length) {
+    const done = S.st.completed || [];
+    root.append(h('div', { class: 'grid' }, h('div', { class: 'card s12' }, cardHead('Completed', h('span', { class: 'muted small' }, `${fmt(done.reduce((a, c) => a + (c.kb || 0), 0))} freed through the checklist`)),
+      h('div', { class: 'tasks' }, done.slice(0, 15).map(c => h('div', { class: 'task done' }, h('input', { type: 'checkbox', class: 'circle', checked: true, disabled: true }), h('div', null, h('div', { class: 't' }, c.title), h('div', { class: 'd' }, ago(c.t))), h('div', { class: 'gain' }, c.kb ? '+' + fmt(c.kb) : '✓'), h('span'))))))); }
+  if (S.st.keptCount) root.append(h('div', { class: 'muted small', style: 'text-align:center' }, `${S.st.keptCount} suggestion(s) you chose to keep are hidden.`));
+  return root;
+}
+
+/* ---------- Overview ---------- */
+function pageOverview() {
+  const d = S.st.disk, cats = S.st.categories.filter(c => c.kb > 0).sort((a, b) => b.kb - a.kb), tot = cats.reduce((a, c) => a + c.kb, 0) || 1;
+  const root = h('div');
+  root.append(header('Storage', `${S.st.home.split('/').pop()}’s Mac · ${(d.used / d.total * 100).toFixed(0)}% used`, scanBtn()));
+  alerts().forEach(a => root.append(h('div', { class: 'banner ' + a.lvl }, h('span', { class: 'dot', style: `background:${a.lvl === 'crit' ? 'var(--red)' : 'var(--orange)'}` }),
+    h('div', { class: 'grow' }, h('b', null, a.t), h('div', { class: 'small muted' }, a.d)), a.cta ? h('button', { class: 'btn sm', onclick: () => go('tasks') }, 'Free up space') : null)));
+
+  const dn = donut(cats);
+  const legend = h('div', { class: 'legend' }, cats.map((c, i) => h('div', { class: 'legend-row', 'data-i': i, onmouseenter: () => dn.set(i), onmouseleave: () => dn.set(null), onclick: () => { S.dirPath = null; go('explorer'); } },
+    h('span', { class: 'dot', style: `background:${c.color}` }), c.name, h('span', { class: 'num' }, fmt(c.kb)), h('span', { class: 'pct' }, (c.kb / tot * 100).toFixed(0) + '%'))));
+  root.append(h('div', { class: 'grid' },
+    h('div', { class: 'card s5' }, cardHead('Disk', h('span', { class: 'muted small' }, (d.used / d.total * 100).toFixed(0) + '% used')),
+      h('div', { class: 'center' }, ring(d)),
+      h('div', { class: 'ring-stats' }, h('div', null, h('b', null, fmtB(d.used)), h('span', null, 'Used')), h('div', null, h('b', null, fmtB(d.free)), h('span', null, 'Free')), h('div', null, h('b', null, fmt(safeKB())), h('span', null, 'Safe to clean')))),
+    h('div', { class: 'card s7' }, cardHead('Where your space goes', h('span', { class: 'muted small' }, 'Hover to highlight · click to explore')), h('div', { class: 'donut-wrap' }, dn, legend))));
+
+  const p = planProgress();
+  root.append(h('div', { class: 'grid' },
+    statCard('s4', 'Safe to clean', fmt(safeKB()), `${sugs().filter(s => s.risk === 'safe').length} items that rebuild themselves`, 'var(--primary)', () => { S.filter = 'safe'; go('cleanup'); }),
+    statCard('s4', 'Needs your review', fmt(reviewKB()), `${sugs().filter(s => s.risk === 'review' && s.method !== 'emptytrash').length} items only you can judge`, 'var(--orange)', () => { S.filter = 'review'; go('cleanup'); }),
+    statCard('s4', 'Freed today', fmt(p.doneKB), `${p.done.length} task${p.done.length === 1 ? '' : 's'} completed · ${fmt(freedKB())} all-time`, 'var(--blue)', () => go('history'))));
+
+  root.append(h('div', { class: 'grid' }, h('div', { class: 's7', style: 'display:grid' }, planCard(5)), h('div', { class: 's5 stack' }, trendCard('7d', 150, 'Free space · 7 days'), reclaimCard())));
+
+  const top = S.st.top.slice(0, 10), mx = top[0]?.kb || 1, cmap = Object.fromEntries(S.st.categories.map(c => [c.name, c.color]));
+  const mk = t => h('div', { class: 'row click', onclick: () => { loadDir(t.path); go('explorer'); } }, h('div', { class: 'bar-row' }, h('div', { class: 'name' }, h('span', null, t.name), h('span', { class: 'chip' }, t.category)), h('span', { class: 'num' }, fmt(t.kb)),
+    h('div', { class: 'track' }, h('i', { style: `width:${t.kb / mx * 100}%;background:${cmap[t.category] || 'var(--primary)'}` }))));
+  root.append(h('div', { class: 'grid' }, h('div', { class: 'card s12' }, cardHead('Biggest space users', h('span', { class: 'muted small' }, 'Top 10 folders · click to open')),
+    top.length ? h('div', { class: 'cols2' }, h('div', { class: 'list' }, top.slice(0, 5).map(mk)), h('div', { class: 'list' }, top.slice(5).map(mk))) : emptyScan())));
+  return root;
+}
+const statCard = (cls, k, v, d, c, fn) => { const [n, u] = v.split(' '); return h('div', { class: 'card stat ' + cls, style: 'cursor:pointer', onclick: fn },
+  h('div', { class: 'k' }, h('span', { class: 'dot', style: `background:${c}` }), k), h('div', { class: 'v' }, n, h('small', null, ' ' + u)), h('div', { class: 'd' }, d)); };
+
+/* ---------- Cleanup ---------- */
 function pageCleanup() {
   const root = h('div'), all = sugs(), shown = all.filter(s => S.filter === 'all' || s.risk === S.filter);
   const tabs = h('div', { class: 'tabs' }, [['all', 'All'], ['safe', 'Safe'], ['review', 'Review']].map(([k, l]) => h('button', { class: 'tab' + (S.filter === k ? ' active' : ''), onclick: () => { S.filter = k; render(); } }, l)));
@@ -141,41 +280,40 @@ function pageCleanup() {
         h('button', { class: 'btn ghost sm', onclick: () => { ids.forEach(i => allOn ? S.sel.delete(i) : S.sel.add(i)); render(); } }, allOn ? 'Deselect' : 'Select all'))),
       h('div', { class: 'card flat', style: 'padding:8px 22px' }, items.map(itemRow))));
   });
-  const picked = all.filter(s => S.sel.has(s.id));
-  if (picked.length) {
-    const kb = picked.reduce((a, s) => a + s.kb, 0);
-    document.body.append(h('div', { class: 'actionbar', id: 'abar' }, h('div', { class: 'in' }, h('div', null, h('b', null, picked.length + ' selected'), h('span', { class: 'muted' }, ' · ' + fmt(kb))),
-      h('button', { class: 'btn ghost sm', onclick: () => { all.filter(s => s.risk === 'safe').forEach(s => S.sel.add(s.id)); render(); } }, 'Select all safe'),
-      h('button', { class: 'btn ghost sm', onclick: () => { S.sel.clear(); render(); } }, 'Clear'),
-      h('button', { class: 'btn', onclick: () => confirmClean(picked) }, 'Clean up'))));
-  }
   return root;
 }
+function updateBar() {
+  document.getElementById('abar')?.remove();
+  if (S.page !== 'cleanup') return;
+  const picked = sugs().filter(s => S.sel.has(s.id)); if (!picked.length) return;
+  const kb = picked.reduce((a, s) => a + s.kb, 0);
+  document.body.append(h('div', { class: 'actionbar', id: 'abar' }, h('div', { class: 'in' }, h('div', null, h('b', null, picked.length + ' selected'), h('span', { class: 'muted' }, ' · ' + fmt(kb))),
+    h('button', { class: 'btn ghost sm', onclick: () => { sugs().filter(s => s.risk === 'safe').forEach(s => S.sel.add(s.id)); render(); } }, 'Select all safe'),
+    h('button', { class: 'btn ghost sm', onclick: () => { S.sel.clear(); render(); } }, 'Clear'),
+    h('button', { class: 'btn', onclick: () => confirmClean(picked, {}) }, 'Clean up'))));
+}
 function itemRow(s) {
-  const cb = h('input', { type: 'checkbox', class: 'check', onchange: e => { e.target.checked ? S.sel.add(s.id) : S.sel.delete(s.id); render(); } }); cb.checked = S.sel.has(s.id);
+  const cb = h('input', { type: 'checkbox', class: 'check', onchange: e => { e.target.checked ? S.sel.add(s.id) : S.sel.delete(s.id); updateBar(); } }); cb.checked = S.sel.has(s.id);
   return h('div', { class: 'item' }, cb,
     h('div', { style: 'min-width:0' }, h('div', { class: 't' }, s.title, h('span', { class: 'chip' }, s.label), h('span', { class: 'chip ' + s.risk }, s.risk === 'safe' ? 'Safe' : 'Review')),
       h('div', { class: 'p', title: s.path }, rel(s.path)), h('div', { class: 'why' }, s.reason), h('div', { class: 'undo' }, '↺ ' + s.restore)),
     h('button', { class: 'icon-btn', title: 'Show in Finder', onclick: () => post('/api/reveal', { path: s.path }) }, icon('reveal')), h('div', { class: 'sz' }, fmt(s.kb)));
 }
-function confirmClean(picked) {
+function confirmClean(picked, meta) {
   const needsMode = picked.some(s => s.method === 'trash'), kb = picked.reduce((a, s) => a + s.kb, 0), hasTrash = picked.some(s => s.method === 'emptytrash');
   let mode = 'trash';
-  const m = document.getElementById('modal'), body = h('div', { class: 'modal' });
-  const opts = h('div');
-  const drawOpts = () => { opts.replaceChildren(
-    optEl('trash', 'Move to Trash (recommended)', 'Installers and files can be put back. Space is freed when you empty the Trash.'),
-    optEl('permanent', 'Delete permanently', 'Frees the space right away. Cannot be undone.')); };
-  const optEl = (v, t, d) => h('label', { class: 'opt' + (mode === v ? ' sel' : ''), onclick: () => { mode = v; drawOpts(); } }, h('input', { type: 'radio', name: 'm', checked: mode === v }), h('div', null, h('b', null, t), h('span', null, d)));
+  const m = document.getElementById('modal'), body = h('div', { class: 'modal' }), opts = h('div');
+  const optEl = (v, t, d) => h('label', { class: 'opt' + (mode === v ? ' sel' : ''), onclick: () => { mode = v; drawOpts(); document.getElementById('go').classList.toggle('danger', mode === 'permanent'); } }, h('input', { type: 'radio', name: 'm', checked: mode === v }), h('div', null, h('b', null, t), h('span', null, d)));
+  const drawOpts = () => opts.replaceChildren(optEl('trash', 'Move to Trash (recommended)', 'Installers and files can be put back. Space is freed when you empty the Trash.'), optEl('permanent', 'Delete permanently', 'Frees the space right away. Cannot be undone.'));
   drawOpts();
   body.append(h('h3', null, `Clean up ${fmt(kb)}?`), h('p', { class: 'lead' }, `${picked.length} item${picked.length > 1 ? 's' : ''} will be removed.` + (hasTrash ? ' Emptying the Trash is permanent.' : '')),
     h('ul', null, picked.slice(0, 60).map(s => h('li', null, h('span', null, s.title), h('span', { class: 'num' }, fmt(s.kb))))),
     needsMode ? opts : h('p', { class: 'small muted' }, 'These are regenerable files, so they are deleted directly — nothing important is lost.'),
     h('div', { class: 'foot' }, h('button', { class: 'btn ghost', onclick: () => m.hidden = true }, 'Cancel'),
-      h('button', { class: 'btn' + (mode === 'permanent' ? ' danger' : ''), id: 'go', onclick: async e => {
+      h('button', { class: 'btn', id: 'go', onclick: async e => {
         e.target.disabled = true; e.target.textContent = 'Cleaning…';
         try {
-          const r = await post('/api/clean', { ids: picked.map(s => s.id), mode });
+          const r = await post('/api/clean', { ids: picked.map(s => s.id), mode, taskId: meta.taskId, taskTitle: meta.taskTitle });
           const ok = r.results.filter(x => x.ok).length, bad = r.results.filter(x => !x.ok);
           m.hidden = true; picked.forEach(s => S.sel.delete(s.id));
           toast(bad.length ? `${ok} cleaned, ${bad.length} failed: ${bad[0].error}` : `Done — freed ${fmt(r.freedKB)}` + (r.freedKB < kb ? ' · empty the Trash to free the rest' : ''), 5000);
@@ -189,7 +327,7 @@ function confirmClean(picked) {
 async function loadDir(p) {
   S.dirPath = p; S.loadingDir = true; if (S.page === 'explorer') render();
   try { S.dir = await api('/api/dir?path=' + encodeURIComponent(p)); } catch (e) { toast(e.message); S.dir = null; }
-  S.loadingDir = false; if (S.page === 'explorer') render();
+  S.loadingDir = false; if (S.page === 'explorer') render({ top: true });
 }
 const TM_COLORS = ['#0a84ff', '#30b0c7', '#34c759', '#ff9f0a', '#bf5af2', '#ff6482', '#5e5ce6', '#ff453a', '#64d2ff', '#a2845e'];
 function squarify(items, x, y, w, hh) {
@@ -212,22 +350,16 @@ function pageExplorer() {
   if (!d) { root.append(h('div', { class: 'card' }, h('div', { class: 'empty' }, S.loadingDir ? [h('span', { class: 'spin' })] : [h('b', null, 'Nothing here'), h('button', { class: 'btn ghost', onclick: () => loadDir(S.st.home) }, 'Back to Home')]))); return root; }
   const parts = d.path.slice(S.st.home.length).split('/').filter(Boolean), crumbs = [h('button', { onclick: () => loadDir(S.st.home) }, 'Home')];
   let acc = S.st.home; parts.forEach(p => { acc += '/' + p; const a = acc; crumbs.push(h('span', { class: 'sep' }, '›'), h('button', { onclick: () => loadDir(a) }, p)); });
-  root.append(h('div', { class: 'card flat', style: 'padding:14px 18px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center' }, h('div', { class: 'crumbs' }, crumbs),
+  root.append(h('div', { class: 'card flat', style: 'padding:14px 18px;margin-bottom:24px;flex-direction:row;justify-content:space-between;align-items:center' }, h('div', { class: 'crumbs' }, crumbs),
     h('div', { class: 'muted' }, h('span', { class: 'num', style: 'color:var(--ink)' }, fmt(d.totalKB)), ' total ', S.loadingDir ? h('span', { class: 'spin' }) : '')));
-  const rows = d.rows, mx = rows[0]?.kb || 1;
-  const tm = h('div', { class: 'treemap' });
-  const card = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Map'), h('span', { class: 'muted small' }, 'Bigger box = more space · click a folder to open it')), tm);
-  root.append(card);
+  const rows = d.rows, mx = rows[0]?.kb || 1, tm = h('div', { class: 'treemap' });
+  root.append(h('div', { class: 'grid' }, h('div', { class: 'card s12' }, cardHead('Map', h('span', { class: 'muted small' }, 'Bigger box = more space · click a folder to open it')), tm)));
   requestAnimationFrame(() => {
     const W = tm.clientWidth, H = tm.clientHeight, items = rows.slice(0, 24).map((r, i) => ({ r, v: r.kb, c: TM_COLORS[i % TM_COLORS.length] }));
-    squarify(items, 0, 0, W, H).forEach(b => {
-      const el = h('div', { class: 'tm', style: `left:${b.x}px;top:${b.y}px;width:${b.w}px;height:${b.h}px`, title: `${b.r.name} · ${fmt(b.r.kb)}`,
-        onclick: () => b.r.kind === 'dir' ? loadDir(b.r.path) : post('/api/reveal', { path: b.r.path }) },
-        h('div', { style: `background:${b.c}` }, b.w > 70 && b.h > 38 ? [h('div', { class: 'n' }, b.r.name), h('div', { class: 's' }, fmt(b.r.kb))] : null));
-      tm.append(el);
-    });
+    squarify(items, 0, 0, W, H).forEach(b => tm.append(h('div', { class: 'tm', style: `left:${b.x}px;top:${b.y}px;width:${b.w}px;height:${b.h}px`, title: `${b.r.name} · ${fmt(b.r.kb)}`,
+      onclick: () => b.r.kind === 'dir' ? loadDir(b.r.path) : post('/api/reveal', { path: b.r.path }) }, h('div', { style: `background:${b.c}` }, b.w > 70 && b.h > 38 ? [h('div', { class: 'n' }, b.r.name), h('div', { class: 's' }, fmt(b.r.kb))] : null))));
   });
-  const list = h('div', { class: 'card', style: 'margin-top:20px' }, h('div', { class: 'card-head' }, h('h2', null, 'Contents'), h('span', { class: 'muted small' }, `${rows.length} largest items`)),
+  const list = h('div', { class: 'card s12' }, cardHead('Contents', h('span', { class: 'muted small' }, `${rows.length} largest items`)),
     rows.length ? rows.map(r => h('div', { class: 'xrow' }, h('span', null, svg(r.kind === 'dir' ? ICON.folder : ICON.file)),
       h('div', { class: 'nm', onclick: () => r.kind === 'dir' ? loadDir(r.path) : post('/api/reveal', { path: r.path }) }, h('b', { title: r.path }, r.name), h('div', { class: 'track' }, h('i', { style: `width:${r.kb / mx * 100}%` }))),
       h('span', { class: 'num', style: 'text-align:right' }, fmt(r.kb)),
@@ -235,7 +367,7 @@ function pageExplorer() {
         h('button', { class: 'icon-btn', title: 'Show in Finder', onclick: () => post('/api/reveal', { path: r.path }) }, icon('reveal')),
         h('button', { class: 'icon-btn', title: 'Move to Trash', onclick: () => confirmTrash(r) }, icon('trash'))))) : h('div', { class: 'empty' }, 'No large items in here.'));
   if (d.otherKB > 1024) list.append(h('div', { class: 'xrow muted' }, h('span'), h('div', null, 'Smaller files & folders'), h('span', { class: 'num', style: 'text-align:right' }, fmt(d.otherKB)), h('span')));
-  root.append(list);
+  root.append(h('div', { class: 'grid' }, list));
   return root;
 }
 function confirmTrash(r) {
@@ -249,57 +381,36 @@ function confirmTrash(r) {
 
 /* ---------- History ---------- */
 function pageHistory() {
-  const root = h('div'), hs = S.st.history, now = Date.now(), span = { '24h': 864e5, '7d': 7 * 864e5, '30d': 30 * 864e5, all: Infinity }[S.range];
-  const data = hs.filter(x => now - x.t <= span); if (data.length === 1) data.unshift({ ...data[0], t: data[0].t - 6e4 });
+  const root = h('div');
   const tabs = h('div', { class: 'tabs' }, ['24h', '7d', '30d', 'all'].map(k => h('button', { class: 'tab' + (S.range === k ? ' active' : ''), onclick: () => { S.range = k; render(); } }, k === 'all' ? 'All' : k)));
-  root.append(header('History', 'Free space over time — the app records it while it is running', tabs));
-  const card = h('div', { class: 'card', style: 'position:relative' }, h('div', { class: 'card-head' }, h('h2', null, 'Free space'), h('span', { class: 'muted small' }, data.length ? `${fmtB(data[data.length - 1].free)} now` : '')));
-  if (data.length < 2) card.append(h('div', { class: 'empty' }, h('b', null, 'Collecting data'), 'Leave the dashboard running and a trend line will appear here.'));
-  else { const tip = h('div', { class: 'tip', hidden: true }); card.append(chart(data, tip), tip); }
-  root.append(card);
+  root.append(header('History', 'Free space over time — recorded while the app is running', tabs));
+  root.append(h('div', { class: 'grid' }, h('div', { class: 's12', style: 'display:grid' }, trendCard(S.range, 280, 'Free space'))));
   const acts = [...(S.st.actions || [])].reverse();
-  root.append(h('div', { class: 'card', style: 'margin-top:20px' }, h('div', { class: 'card-head' }, h('h2', null, 'Cleanup log'), h('span', { class: 'muted small' }, `${fmt(freedKB())} freed in total`)),
+  root.append(h('div', { class: 'grid' }, h('div', { class: 'card s12' }, cardHead('Cleanup log', h('span', { class: 'muted small' }, `${fmt(freedKB())} freed in total`)),
     acts.length ? h('div', { class: 'list' }, acts.slice(0, 40).map(a => h('div', { class: 'row' }, h('div', null, h('div', { style: 'font-weight:600' }, a.title, ' ', h('span', { class: 'chip' }, a.how === 'trash' ? 'Moved to Trash' : 'Deleted')),
-      h('div', { class: 'small muted mono' }, rel(a.path)), h('div', { class: 'small muted' }, ago(a.t))), h('span', { class: 'num' }, fmt(a.kb))))) : h('div', { class: 'empty' }, 'Nothing cleaned yet.')));
+      h('div', { class: 'small muted mono' }, rel(a.path)), h('div', { class: 'small muted' }, ago(a.t))), h('span', { class: 'num' }, fmt(a.kb))))) : h('div', { class: 'empty' }, 'Nothing cleaned yet.'))));
   return root;
 }
-function chart(data, tip) {
-  const W = 1000, H = 280, P = { l: 52, r: 16, t: 14, b: 28 }, t0 = data[0].t, t1 = data[data.length - 1].t;
-  const vals = data.map(d => d.free / 1e9), lo = Math.max(0, Math.min(...vals) * .9), hi = Math.max(...vals) * 1.08 + .1;
-  const X = t => P.l + (t - t0) / ((t1 - t0) || 1) * (W - P.l - P.r), Y = v => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
-  const pts = data.map(d => [X(d.t), Y(d.free / 1e9)]), line = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
-  const el = h('div'); let grid = '';
-  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4, y = Y(v); grid += `<line x1="${P.l}" x2="${W - P.r}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${P.l - 10}" y="${y + 4}" text-anchor="end">${Math.round(v)} GB</text>`; }
-  const fm = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + (t1 - t0 < 2 * 864e5 ? ' ' + new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
-  el.innerHTML = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="ar" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--primary)" stop-opacity=".28"/><stop offset="1" stop-color="var(--primary)" stop-opacity="0"/></linearGradient></defs>
-    ${grid}<path d="${line} L${pts[pts.length - 1][0]} ${H - P.b} L${pts[0][0]} ${H - P.b} Z" fill="url(#ar)"/><path d="${line}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-    <text x="${P.l}" y="${H - 6}">${fm(t0)}</text><text x="${W - P.r}" y="${H - 6}" text-anchor="end">${fm(t1)}</text><circle id="cur" r="5" fill="var(--primary)" stroke="var(--surface)" stroke-width="2.5" display="none"/></svg>`;
-  const s = el.firstChild, cur = s.querySelector('#cur');
-  s.addEventListener('mousemove', e => {
-    const r = s.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * W; let best = 0;
-    pts.forEach((p, i) => { if (Math.abs(p[0] - x) < Math.abs(pts[best][0] - x)) best = i; });
-    const p = pts[best]; cur.setAttribute('cx', p[0]); cur.setAttribute('cy', p[1]); cur.setAttribute('display', 'block');
-    tip.hidden = false; tip.style.left = (p[0] / W * r.width) + 'px'; tip.style.top = (p[1] / H * r.height + 70) + 'px';
-    tip.replaceChildren(h('b', null, fmtB(data[best].free) + ' free'), h('div', { class: 'muted' }, new Date(data[best].t).toLocaleString()));
-  });
-  s.addEventListener('mouseleave', () => { tip.hidden = true; cur.setAttribute('display', 'none'); });
-  return el;
-}
 
-/* ---------- render loop ---------- */
-function render() {
+/* ---------- render loop ----------
+ * Re-rendering used to replay the entry animation and jump the scroll, which looked like a page reload on every
+ * click. Now the animation only runs on real navigation, and the scroll position is kept on in-page updates. */
+const PAGES = { overview: pageOverview, tasks: pageTasks, cleanup: pageCleanup, explorer: pageExplorer, history: pageHistory };
+function render(opts = {}) {
   if (!S.st) return;
-  document.getElementById('abar')?.remove();
+  const y = window.scrollY;
   renderShell();
-  const main = document.getElementById('main'), page = { overview: pageOverview, cleanup: pageCleanup, explorer: pageExplorer, history: pageHistory }[S.page]();
-  main.replaceChildren(page); main.style.animation = 'none'; void main.offsetWidth; main.style.animation = '';
+  const main = document.getElementById('main');
+  main.replaceChildren(PAGES[S.page]());
+  main.classList.toggle('enter', !!opts.anim);
+  if (opts.top) window.scrollTo(0, 0); else window.scrollTo(0, y);
+  updateBar();
 }
 async function refresh(force) {
   try {
-    const wasRunning = S.st?.scan.running;
     S.st = await api('/api/state');
     const ids = new Set(sugs().map(s => s.id)); [...S.sel].forEach(i => { if (!ids.has(i)) S.sel.delete(i); });
-    if (force || !wasRunning || !S.st.scan.running || true) render();
+    render();
   } catch (e) { /* server restarting */ }
 }
 let polling = false;
@@ -309,9 +420,14 @@ async function poll() {
   polling = false;
 }
 (async function init() {
-  const h0 = location.hash.slice(1); if (['overview', 'cleanup', 'explorer', 'history'].includes(h0)) S.page = h0;
+  const h0 = location.hash.slice(1); if (PAGES[h0]) S.page = h0;
   await refresh(true);
+  render({ anim: true });
   if (S.page === 'explorer') loadDir(S.st.home);
   poll();
-  setInterval(async () => { if (document.hidden || S.st.scan.running || !document.getElementById('modal').hidden) return; const keep = S.page === 'cleanup' || S.page === 'explorer'; const s = await api('/api/status').catch(() => null); if (s) { S.st.disk = s.disk; if (!keep) await refresh(); } }, 30000);
+  setInterval(async () => {
+    if (document.hidden || S.st.scan.running || !document.getElementById('modal').hidden || S.busy.size) return;
+    const s = await api('/api/status').catch(() => null); if (!s) return;
+    S.st.disk = s.disk; if (S.page === 'overview' || S.page === 'tasks') await refresh();
+  }, 30000);
 })();
