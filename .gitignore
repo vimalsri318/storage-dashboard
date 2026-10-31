@@ -1,0 +1,6 @@
+# local scan results, history and logs (contain personal paths)
+data/
+build/
+*.log
+.DS_Store
+node_modules/
