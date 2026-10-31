@@ -1,0 +1,40 @@
+name: Release
+# Push a tag like v1.2.3 (matching package.json) → build, create the GitHub release, tell the Fleet Admin server.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Tag must match package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - run: npm test
+      - name: Build
+        env:
+          STORAGE_ADMIN_URL: ${{ vars.STORAGE_ADMIN_URL }}   # optional: bake in your fleet server
+        run: ./macos/build.sh --release
+      - name: Publish GitHub release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          PRE=""; case "$GITHUB_REF_NAME" in *-*) PRE="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" dist/Storage-*.zip dist/Storage-*.zip.sha256 \
+            --title "Storage ${GITHUB_REF_NAME#v}" --generate-notes $PRE
+      - name: Tell the Fleet Admin server
+        if: ${{ vars.STORAGE_ADMIN_URL != '' && !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADMIN_URL: ${{ vars.STORAGE_ADMIN_URL }}
+          PUBLISH_TOKEN: ${{ secrets.FLEET_PUBLISH_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"; Z="dist/Storage-$V.zip"
+          SHA=$(cut -d' ' -f1 "$Z.sha256"); SIZE=$(stat -f%z "$Z")
+          NOTES=$(gh release view "$GITHUB_REF_NAME" --json body -q .body)
+          jq -n --arg v "$V" --arg url "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/Storage-$V.zip" --arg sha "$SHA" --argjson size "$SIZE" --arg notes "$NOTES" \
+            '{version:$v,url:$url,sha256:$sha,size:$size,notes:$notes,rollout:10}' \
+          | curl -fsS -X POST "$ADMIN_URL/api/v1/publish" -H "authorization: Bearer $PUBLISH_TOKEN" -H 'content-type: application/json' -d @-

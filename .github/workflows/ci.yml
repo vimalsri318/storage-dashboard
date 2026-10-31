@@ -1,0 +1,23 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: node --check server.js && node --check admin/server.js && node --check public/app.js && node --check admin/public/admin.js
+      - run: npm test
+  mac-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build Storage.app (app + widget)
+        run: ./macos/build.sh --release
+      - uses: actions/upload-artifact@v4
+        with: { name: Storage-app, path: dist/ }

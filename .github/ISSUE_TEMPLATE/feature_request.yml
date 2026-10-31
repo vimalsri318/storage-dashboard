@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest an idea, for example a new safe-to-clean rule
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: For a cleanup rule include the path, why it is safe, and how it is recreated.
+    validations:
+      required: true
