@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Storage">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fd99a"/><stop offset="1" stop-color="#138553"/></linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d4f8e6"/></linearGradient>
+    <radialGradient id="gloss" cx=".5" cy="0" r=".95"><stop offset="0" stop-color="#fff" stop-opacity=".38"/><stop offset=".65" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000" flood-opacity=".28"/></filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="url(#gloss)"/>
+  <rect x="66" y="66" width="892" height="892" rx="212" fill="none" stroke="#fff" stroke-opacity=".25" stroke-width="3"/>
+  <circle cx="512" cy="512" r="282" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="78"/>
+  <circle cx="512" cy="512" r="282" fill="none" stroke="url(#ring)" stroke-width="78" stroke-linecap="round" stroke-dasharray="1276 1772" transform="rotate(-90 512 512)"/>
+  <g fill="#fff">
+    <rect x="402" y="412" width="220" height="46" rx="23"/>
+    <rect x="402" y="489" width="220" height="46" rx="23"/>
+    <rect x="402" y="566" width="220" height="46" rx="23" fill="#a6ebc8"/>
+    <rect x="402" y="566" width="122" height="46" rx="23"/>
+  </g>
+  <g fill="#168a58"><circle cx="591" cy="435" r="10"/><circle cx="591" cy="512" r="10"/></g>
+</svg>
