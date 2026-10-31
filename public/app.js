@@ -1,7 +1,7 @@
 'use strict';
 /* Storage dashboard front-end. No libraries. All text goes through textContent (file names are untrusted). */
 const TOKEN = window.__TOKEN__;
-const S = { st: null, page: 'overview', filter: 'all', sel: new Set(), dir: null, dirPath: null, range: '7d', loadingDir: false, busy: new Set(), hoverCat: null };
+const S = { st: null, page: 'overview', filter: 'all', sel: new Set(), dir: null, dirPath: null, range: '7d', loadingDir: false, busy: new Set(), hoverCat: null, tsel: new Set() };
 
 /* ---------- helpers ---------- */
 function h(tag, attrs, ...kids) {
@@ -20,6 +20,7 @@ const ICON = {
   chart: '<path d="M4 19V5M4 19h16M8 15l4-5 3 3 5-7"/>', file: '<path d="M7 3h7l5 5v13H7zM14 3v5h5"/>', reveal: '<path d="M10 14L21 3M21 3h-6M21 3v6M19 14v5a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h5"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', list: '<path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/>', moon: '<path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 01-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 010-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 014 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 010 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
   auto: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>', copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v8a2 2 0 002 2h2"/>',
 };
 const icon = n => svg(ICON[n]);
@@ -67,12 +68,12 @@ function alerts() {
 }
 
 /* ---------- shell ---------- */
-const NAV = [['overview', 'Overview', 'home'], ['tasks', 'Checklist', 'list'], ['cleanup', 'Cleanup', 'broom'], ['explorer', 'Explorer', 'folder'], ['history', 'History', 'chart']];
+const NAV = [['overview', 'Overview', 'home'], ['tasks', 'Checklist', 'list'], ['cleanup', 'Cleanup', 'broom'], ['explorer', 'Explorer', 'folder'], ['history', 'History', 'chart'], ['settings', 'Settings', 'gear']];
 function renderShell() {
   const nav = document.getElementById('nav'); nav.replaceChildren();
   if (!S.st) return;
   NAV.forEach(([id, label, ic]) => {
-    const n = id === 'tasks' ? tasks().length : id === 'cleanup' ? sugs().length : 0;
+    const n = id === 'tasks' ? tasks().length : id === 'cleanup' ? sugs().length : id === 'settings' ? (S.st.app?.update.available ? 1 : 0) : 0;
     nav.append(h('button', { class: 'nav-item' + (S.page === id ? ' active' : ''), onclick: () => go(id) }, icon(ic), label, n ? h('span', { class: 'pill' }, n) : null));
   });
   const sc = S.st.scan, f = document.getElementById('sideFoot'); f.replaceChildren();
@@ -89,7 +90,32 @@ async function startScan() { try { await post('/api/scan'); S.st.scan.running = 
 function header(title, sub, right) {
   return h('div', { class: 'head' }, h('div', null, h('h1', null, title), sub ? h('div', { class: 'sub' }, sub) : null), right || null);
 }
-function scanBtn() { return S.st.scan.running ? h('span', { class: 'muted small' }, h('span', { class: 'spin' }), '  ', S.st.scan.phase) : h('button', { class: 'btn', onclick: startScan }, 'Rescan'); }
+function scanBtn() { return S.st.scan.running ? h('span', { class: 'scanpill' }, h('i', { class: 'mini' }), h('span', { class: 'dots' }, 'Scanning')) : h('button', { class: 'btn', onclick: startScan }, 'Rescan'); }
+const SCAN_STEPS = [['Map your disk', ['Starting…', 'Mapping your disk']], ['Apps & system', ['Measuring apps and system folders']], ['Build folders', ['Finding build folders', 'Measuring build folders']], ['Caches', ['Checking caches']], ['Installers & big files', ['Looking for old installers & big files']]];
+const scanStep = phase => Math.max(0, SCAN_STEPS.findIndex(s => s[1].includes(phase)));
+function scanCard(compact) {
+  const sc = S.st.scan; if (!sc.running) return null;
+  const radar = h('div', { class: 'radar' }, h('i', { class: 'sweep' }), h('i', { class: 'blip' }), h('i', { class: 'blip' }), h('i', { class: 'blip' }), h('i', { class: 'blip' }));
+  return h('div', { class: 'scancard' + (compact ? ' compact' : ''), id: 'scancard' }, radar, h('div', { class: 'body' },
+    h('h3', null, 'Scanning your Mac', h('span', { id: 'sc-pct' }, Math.round(sc.progress * 100) + '%')), h('div', { class: 'phase', id: 'sc-phase' }, sc.phase),
+    h('div', { class: 'path', id: 'sc-path' }, sc.current ? '\u202A' + rel(sc.current) : ''), h('div', { class: 'bar' }, h('i', { id: 'sc-bar', style: `width:${Math.round(sc.progress * 100)}%` })),
+    compact ? null : h('ul', { class: 'steps', id: 'sc-steps', style: 'padding:0;margin:14px 0 0' }, SCAN_STEPS.map(([l], i) => h('li', { class: i < scanStep(sc.phase) ? 'done' : i === scanStep(sc.phase) ? 'on' : '' }, h('i'), l)))));
+}
+function updateScanCard() {
+  const sc = S.st.scan, el = document.getElementById('scancard'); if (!el) return;
+  const set = (id, t) => { const n = document.getElementById(id); if (n && n.textContent !== t) n.textContent = t; };
+  set('sc-pct', Math.round(sc.progress * 100) + '%'); set('sc-phase', sc.phase); set('sc-path', sc.current ? '\u202A' + rel(sc.current) : '');
+  const b = document.getElementById('sc-bar'); if (b) b.style.width = Math.round(sc.progress * 100) + '%';
+  document.querySelectorAll('#sc-steps li').forEach((li, i) => { li.className = i < scanStep(sc.phase) ? 'done' : i === scanStep(sc.phase) ? 'on' : ''; });
+}
+function scanComplete() {
+  const kb = safeKB(), w = h('div', { class: 'done-wrap', onclick: () => w.remove() });
+  const card = h('div', { class: 'done-card' });
+  card.innerHTML = '<svg viewBox="0 0 100 100"><circle class="c1" cx="50" cy="50" r="46"/><path class="c2" d="M30 52l14 14 27-30"/></svg>';
+  [[-90, -70], [90, -70], [-110, 10], [110, 10], [-50, -100], [50, -100]].forEach(([x, y]) => { const d = h('i', { class: 'spark', style: `--x:${x}px;--y:${y}px` }); card.append(d); });
+  card.append(h('h3', null, 'Scan complete'), h('p', null, kb ? `${fmt(kb)} can be cleaned safely right now.` : 'Your Mac looks tidy.'));
+  w.append(card); document.body.append(w); setTimeout(() => w.remove(), 2800);
+}
 const emptyScan = () => h('div', { class: 'empty' }, S.st.scan.running ? [h('span', { class: 'spin' }), h('div', { style: 'margin-top:12px' }, 'Scanning your Mac for the first time…')] : [h('b', null, 'No scan yet'), h('button', { class: 'btn', style: 'margin-top:12px', onclick: startScan }, 'Scan now')]);
 const cardHead = (title, right) => h('div', { class: 'card-head' }, h('h2', null, title), right || null);
 
@@ -172,7 +198,11 @@ function planProgress() {
   return { open, done, doneKB, openKB, pct: total ? done.length / total : 0 };
 }
 function taskRow(t) {
-  const busy = S.busy.has(t.id), cb = h('input', { type: 'checkbox', class: 'circle', 'aria-label': 'Complete task', disabled: busy, onchange: e => { e.target.checked = false; primary(t); } });
+  const busy = S.busy.has(t.id), run = runnable(t);
+  const cb = h('input', { type: 'checkbox', class: 'circle', 'aria-label': run ? 'Select task' : 'Mark as done', disabled: busy,
+    title: run ? 'Select it, then press “Run selected”. Nothing happens until you confirm.' : 'Mark as done (nothing is deleted)',
+    onchange: e => { if (run) { e.target.checked ? S.tsel.add(t.id) : S.tsel.delete(t.id); updateBar(); } else { e.target.checked = false; markDone(t); } } });
+  cb.checked = S.tsel.has(t.id);
   const acts = h('div', { class: 'acts' });
   if (busy) acts.append(h('span', { class: 'muted small' }, h('span', { class: 'spin' }), '  Working…'));
   else if (t.type === 'auto') acts.append(h('button', { class: 'btn sm', onclick: () => primary(t) }, 'Clean up'));
@@ -186,26 +216,46 @@ function taskRow(t) {
         t.undo ? h('span', { class: 'u' }, '↺ ' + t.undo) : null)),
     h('div', { class: 'gain' }, t.kb ? ['+' + fmt(t.kb), h('small', null, 'free')] : h('span', { class: 'muted small' }, 'varies')), acts);
 }
+const runnable = t => t.type === 'auto' || t.type === 'review' || (t.type === 'manual' && !!t.run);
 function primary(t) {
-  if (t.type === 'auto') return runClean(t, 'trash');
-  if (t.type === 'review') { const picked = sugs().filter(s => t.sids.includes(s.id)); return picked.length ? confirmClean(picked, { taskId: t.id, taskTitle: t.title }) : refresh(true); }
-  if (t.type === 'manual' && t.run) return runCommand(t);
-  if (t.type === 'open') { loadDir(t.path); go('explorer'); }
+  if (t.type === 'open') { loadDir(t.path); go('explorer'); return; }
+  if (t.type === 'manual' && !t.run) { copy(t.command); return; }
+  confirmTasks([t]);
 }
-async function runClean(t, mode) {
+async function executeTask(t, mode) {
   S.busy.add(t.id); render();
   try {
+    if (t.type === 'manual') { const r = await post('/api/run', { key: t.run, taskId: t.id, title: t.title }); return { ok: true, kb: r.freedKB }; }
     const r = await post('/api/clean', { ids: t.sids, mode, taskId: t.id, taskTitle: t.title });
     const bad = r.results.filter(x => !x.ok);
-    toast(bad.length ? `Some items failed: ${bad[0].error}` : `Done — freed ${fmt(r.freedKB)}`, 4500);
-  } catch (e) { toast(e.message); }
-  S.busy.delete(t.id); await refresh(true);
+    return bad.length ? { ok: false, error: bad[0].error } : { ok: true, kb: r.freedKB };
+  } catch (e) { return { ok: false, error: e.message }; }
+  finally { S.busy.delete(t.id); S.tsel.delete(t.id); }
 }
-async function runCommand(t) {
-  S.busy.add(t.id); render();
-  try { const r = await post('/api/run', { key: t.run, taskId: t.id, title: t.title }); toast(r.freedKB ? `Done — freed ${fmt(r.freedKB)}` : 'Done — nothing noticeable to free', 4500); }
-  catch (e) { toast(e.message, 6000); }
-  S.busy.delete(t.id); await refresh(true);
+function confirmTasks(list) {
+  const kb = list.reduce((a, t) => a + (t.kb || 0), 0), needsMode = list.some(t => t.type === 'review' && t.method === 'trash');
+  const review = list.some(t => t.type === 'review');
+  let mode = 'trash';
+  const m = document.getElementById('modal'), body = h('div', { class: 'modal' }), opts = h('div');
+  const optEl = (v, t, d) => h('label', { class: 'opt' + (mode === v ? ' sel' : ''), onclick: () => { mode = v; drawOpts(); document.getElementById('go').classList.toggle('danger', mode === 'permanent'); } }, h('input', { type: 'radio', name: 'm', checked: mode === v }), h('div', null, h('b', null, t), h('span', null, d)));
+  const drawOpts = () => opts.replaceChildren(optEl('trash', 'Move to Trash (recommended)', 'You can put it back. Space is freed once the Trash is emptied.'), optEl('permanent', 'Delete permanently', 'Frees the space right away. Cannot be undone.'));
+  drawOpts();
+  body.append(h('h3', null, list.length === 1 ? list[0].title + '?' : `Run ${list.length} tasks?`), h('p', { class: 'lead' }, kb ? `This will free about ${fmt(kb)}.` : 'This will run once and report what it freed.'),
+    h('ul', null, list.map(t => h('li', null, h('span', null, t.title), h('span', { class: 'num' }, t.kb ? fmt(t.kb) : t.command || '—')))),
+    h('p', { class: 'small muted' }, review ? 'Includes items that need your judgement — double-check the list.' : 'Everything here is regenerable: tools rebuild it when they need it.'),
+    needsMode ? opts : null,
+    h('div', { class: 'foot' }, h('button', { class: 'btn ghost', onclick: () => m.hidden = true }, 'Cancel'),
+      h('button', { class: 'btn', id: 'go', onclick: async e => {
+        e.target.disabled = true; let freed = 0, fails = [];
+        for (let i = 0; i < list.length; i++) {
+          e.target.textContent = list.length > 1 ? `Working… ${i + 1} of ${list.length}` : 'Working…';
+          const r = await executeTask(list[i], mode); if (r.ok) freed += r.kb || 0; else fails.push(r.error);
+        }
+        m.hidden = true;
+        toast(fails.length ? `${list.length - fails.length} done, ${fails.length} failed: ${fails[0]}` : `Done — freed ${fmt(freed)}` + (mode === 'trash' && needsMode ? ' (empty the Trash to finish)' : ''), 5000);
+        await refresh(true);
+      } }, 'Run')));
+  m.replaceChildren(body); m.hidden = false; m.onclick = e => { if (e.target === m) m.hidden = true; };
 }
 async function markDone(t) { try { await post('/api/task', { id: t.id, action: 'done', title: t.title, kb: 0 }); toast('Marked as done'); } catch (e) { toast(e.message); } await refresh(true); }
 async function keepTask(t) { try { await post('/api/task', { id: t.id, action: 'keep' }); toast('Okay — we won’t suggest it again'); } catch (e) { toast(e.message); } await refresh(true); }
@@ -220,6 +270,8 @@ function planCard(limit) {
 function pageTasks() {
   const root = h('div'), p = planProgress();
   root.append(header('Checklist', `${p.open.length} small tasks · ${fmt(p.openKB)} you can free`, scanBtn()));
+  root.append(h('div', { class: 'banner ok' }, h('span', { class: 'dot', style: 'background:var(--primary)' }), h('div', { class: 'grow small' },
+    h('b', null, 'How it works: '), 'tick the circle to select a task, then press ', h('b', null, 'Run selected'), ' — or use a task’s own button. You always get a confirmation first; nothing is deleted by ticking.')));
   root.append(h('div', { class: 'grid' }, h('div', { class: 's12' }, planCard(0))));
   if (p.done.length || (S.st.completed || []).length) {
     const done = S.st.completed || [];
@@ -284,13 +336,20 @@ function pageCleanup() {
 }
 function updateBar() {
   document.getElementById('abar')?.remove();
-  if (S.page !== 'cleanup') return;
-  const picked = sugs().filter(s => S.sel.has(s.id)); if (!picked.length) return;
-  const kb = picked.reduce((a, s) => a + s.kb, 0);
-  document.body.append(h('div', { class: 'actionbar', id: 'abar' }, h('div', { class: 'in' }, h('div', null, h('b', null, picked.length + ' selected'), h('span', { class: 'muted' }, ' · ' + fmt(kb))),
-    h('button', { class: 'btn ghost sm', onclick: () => { sugs().filter(s => s.risk === 'safe').forEach(s => S.sel.add(s.id)); render(); } }, 'Select all safe'),
-    h('button', { class: 'btn ghost sm', onclick: () => { S.sel.clear(); render(); } }, 'Clear'),
-    h('button', { class: 'btn', onclick: () => confirmClean(picked, {}) }, 'Clean up'))));
+  let label, kb, clear, runAll, extra = null;
+  if (S.page === 'cleanup') {
+    const picked = sugs().filter(s => S.sel.has(s.id)); if (!picked.length) return;
+    label = picked.length + ' selected'; kb = picked.reduce((a, s) => a + s.kb, 0);
+    extra = h('button', { class: 'btn ghost sm', onclick: () => { sugs().filter(s => s.risk === 'safe').forEach(s => S.sel.add(s.id)); render(); } }, 'Select all safe');
+    clear = () => { S.sel.clear(); render(); }; runAll = () => confirmClean(picked, {});
+  } else if (S.page === 'tasks' || S.page === 'overview') {
+    const picked = tasks().filter(t => S.tsel.has(t.id)); if (!picked.length) return;
+    label = picked.length + ' task' + (picked.length > 1 ? 's' : '') + ' selected'; kb = picked.reduce((a, t) => a + (t.kb || 0), 0);
+    clear = () => { S.tsel.clear(); render(); }; runAll = () => confirmTasks(picked);
+  } else return;
+  document.body.append(h('div', { class: 'actionbar', id: 'abar' }, h('div', { class: 'in' }, h('div', null, h('b', null, label), kb ? h('span', { class: 'muted' }, ' · ' + fmt(kb)) : null),
+    extra, h('button', { class: 'btn ghost sm', onclick: clear }, 'Clear'),
+    h('button', { class: 'btn', onclick: runAll }, S.page === 'cleanup' ? 'Clean up' : 'Run selected'))));
 }
 function itemRow(s) {
   const cb = h('input', { type: 'checkbox', class: 'check', onchange: e => { e.target.checked ? S.sel.add(s.id) : S.sel.delete(s.id); updateBar(); } }); cb.checked = S.sel.has(s.id);
@@ -392,16 +451,95 @@ function pageHistory() {
   return root;
 }
 
+/* ---------- updates, notices, settings ---------- */
+const dismissed = () => { try { return JSON.parse(localStorage.getItem('sd-dismissed') || '[]'); } catch { return []; } };
+const dismiss = id => { try { localStorage.setItem('sd-dismissed', JSON.stringify([...dismissed(), id].slice(-30))); } catch { /* ignore */ } render(); };
+function appBanners() {
+  const a = S.st.app, out = []; if (!a) return out;
+  if (a.update.available) {
+    const v = a.update.latest.version;
+    out.push(h('div', { class: 'banner ' + (a.update.mandatory ? 'crit' : 'ok'), style: 'margin-top:-8px' }, h('span', { class: 'dot', style: `background:${a.update.mandatory ? 'var(--red)' : 'var(--primary)'}` }),
+      h('div', { class: 'grow' }, h('b', null, a.update.mandatory ? `Update required — Storage ${v}` : `Storage ${v} is available`), h('div', { class: 'small muted' }, a.appManaged ? 'Restart to update. It takes a few seconds and keeps all your data.' : 'Download the latest release to update.')),
+      a.appManaged ? h('button', { class: 'btn sm', onclick: confirmUpdate }, 'Restart to update') : h('button', { class: 'btn sm', onclick: () => go('settings') }, 'How to update'),
+      a.update.mandatory ? null : h('button', { class: 'btn ghost sm', onclick: () => dismiss('u' + v) }, 'Later')));
+    if (!a.update.mandatory && dismissed().includes('u' + v)) out.pop();
+  }
+  (a.notices || []).filter(n => !dismissed().includes('n' + n.id)).forEach(n => out.push(h('div', { class: 'banner ' + (n.kind === 'critical' ? 'crit' : n.kind === 'warn' ? 'warn' : 'ok'), style: 'margin-top:-8px' },
+    h('span', { class: 'dot', style: `background:${n.kind === 'critical' ? 'var(--red)' : n.kind === 'warn' ? 'var(--orange)' : 'var(--primary)'}` }), h('div', { class: 'grow' }, h('b', null, n.message)), h('button', { class: 'btn ghost sm', onclick: () => dismiss('n' + n.id) }, 'Dismiss'))));
+  return out;
+}
+function confirmUpdate() {
+  const a = S.st.app, v = a.update.latest.version, m = document.getElementById('modal');
+  const body = h('div', { class: 'modal' }, h('h3', null, `Update to Storage ${v}?`), h('p', { class: 'lead' }, 'Storage will download the update, verify it, quit and reopen by itself. Your settings and history are kept.'),
+    a.update.latest.notes ? h('div', { class: 'note', style: 'white-space:pre-line;max-height:160px;overflow:auto;margin-bottom:6px' }, a.update.latest.notes) : null,
+    h('div', { class: 'foot' }, h('button', { class: 'btn ghost', onclick: () => m.hidden = true }, 'Not now'), h('button', { class: 'btn', onclick: async e => {
+      e.target.disabled = true; e.target.textContent = 'Downloading & verifying…';
+      try { await post('/api/app/install'); m.hidden = true; updatingOverlay(v); } catch (err) { m.hidden = true; toast(err.message, 7000); }
+    } }, 'Update & restart')));
+  m.replaceChildren(body); m.hidden = false; m.onclick = e => { if (e.target === m) m.hidden = true; };
+}
+function updatingOverlay(v) {
+  const w = h('div', { class: 'done-wrap', style: 'cursor:default' }, h('div', { class: 'done-card' }, h('img', { src: '/logo.svg', style: 'width:84px;height:84px;animation:pop-in .6s both' }), h('h3', null, `Updating to ${v}…`), h('p', null, 'Storage is restarting. This window will reconnect on its own.'), h('div', { class: 'bar', style: 'margin-top:18px;height:6px;border-radius:9px;background:var(--line);overflow:hidden' }, h('i', { style: 'display:block;height:100%;width:40%;background:var(--primary);border-radius:9px;animation:glide 1.2s ease-in-out infinite' }))));
+  document.body.append(w);
+  const t0 = Date.now(), tick = async () => { try { const j = await api('/api/app'); if (j.version === v) return location.reload(); } catch { /* restarting */ } if (Date.now() - t0 > 90000) { w.remove(); toast('The update did not finish — please reopen Storage.', 8000); } else setTimeout(tick, 1500); };
+  setTimeout(tick, 4000);
+}
+function consentModal() {
+  const a = S.st.app; if (!a || !a.telemetry.adminConfigured || a.telemetry.mode !== 'unset') return;
+  const m = document.getElementById('modal'), choose = async mode => { try { await post('/api/app/telemetry', { mode }); } catch (e) { toast(e.message); } m.hidden = true; await refresh(true); };
+  let payloadBox = h('pre', { class: 'note mono', style: 'display:none;white-space:pre-wrap;margin:10px 0 0' });
+  api('/api/app').then(j => { payloadBox.textContent = JSON.stringify(j.payload, null, 2); });
+  m.replaceChildren(h('div', { class: 'modal' }, h('img', { src: '/logo.svg', style: 'width:56px;height:56px;margin-bottom:10px' }), h('h3', null, 'Help improve Storage?'),
+    h('p', { class: 'lead' }, `Share an anonymous check-in with ${a.telemetry.adminHost} so the developer can count installs and tell you when an update is out.`),
+    h('ul', { style: 'max-height:none' }, ['Random install id (not tied to you or your Mac)', 'App version, macOS version, Apple silicon / Intel'].map(t => h('li', null, h('span', null, '✓ ' + t)))),
+    h('p', { class: 'small muted', style: 'margin:0' }, 'Never sent: file names, folders, sizes, your name, or anything from your disk. Change your mind any time in Settings.'),
+    h('button', { class: 'btn ghost sm', style: 'margin-top:12px', onclick: () => { payloadBox.style.display = payloadBox.style.display === 'none' ? 'block' : 'none'; } }, 'Show exactly what is sent'), payloadBox,
+    h('div', { class: 'foot' }, h('button', { class: 'btn ghost', onclick: () => choose('off') }, 'No thanks'), h('button', { class: 'btn', onclick: () => choose('on') }, 'Share anonymously'))));
+  m.hidden = false;
+}
+function pageSettings() {
+  const root = h('div');
+  if (!S.info || Date.now() - S.infoAt > 30000) { S.infoAt = Date.now(); api('/api/app').then(j => { S.info = j; S.st.app = { ...j }; if (S.page === 'settings') render(); }).catch(() => {}); }
+  const info = S.info || S.st.app;
+  const u = info.update, tl = info.telemetry;
+  const statusLine = u.available ? `Version ${u.latest.version} is available (you have ${info.version}).` : u.error && !u.checkedAt ? 'Not checked yet.' : `You’re up to date — version ${info.version}.`;
+  root.append(header('Settings', 'Updates, privacy and about', null));
+  const checkBtn = h('button', { class: 'btn ghost', onclick: async e => { e.target.disabled = true; e.target.textContent = 'Checking…'; try { S.st.app = await post('/api/app/check'); S.info = null; } catch (x) { toast(x.message); } render(); } }, 'Check now');
+  const updCard = h('div', { class: 'card s6' }, cardHead('Updates', h('span', { class: 'chip ' + (u.available ? 'review' : 'safe') }, u.available ? 'Update available' : 'Up to date')),
+    h('div', { class: 'card-body' }, h('div', { style: 'font-size:17px;font-weight:600' }, statusLine), h('div', { class: 'small muted', style: 'margin-top:6px' }, u.checkedAt ? `Last checked ${ago(u.checkedAt)}${u.source ? ' via ' + (u.source === 'admin' ? tl.adminHost : 'GitHub releases') : ''}` : 'Checks automatically every few hours.'),
+      u.error ? h('div', { class: 'small', style: 'margin-top:8px;color:var(--orange)' }, 'Last check failed: ' + u.error) : null,
+      u.available && u.latest.notes ? h('div', { class: 'note', style: 'margin-top:14px;white-space:pre-line;max-height:150px;overflow:auto' }, u.latest.notes) : null,
+      !info.appManaged ? h('div', { class: 'note', style: 'margin-top:14px' }, 'You’re running from source. Update with ', h('span', { class: 'cmd' }, 'git pull'), ' or rebuild the app with ', h('span', { class: 'cmd' }, './macos/build.sh --install'), '.') : null),
+    h('div', { style: 'display:flex;gap:10px;margin-top:18px' }, checkBtn, u.available && info.appManaged ? h('button', { class: 'btn', onclick: confirmUpdate }, 'Restart to update') : null));
+  const sw = h('input', { type: 'checkbox', class: 'switch', disabled: !tl.adminConfigured, onchange: async e => { try { S.st.app = await post('/api/app/telemetry', { mode: e.target.checked ? 'on' : 'off' }); S.info = null; toast(e.target.checked ? 'Thanks! Anonymous check-ins are on.' : 'Telemetry is off.'); } catch (x) { toast(x.message); } render(); } }); sw.checked = tl.mode === 'on';
+  const privCard = h('div', { class: 'card s6' }, cardHead('Privacy', h('span', { class: 'chip ' + (tl.mode === 'on' ? 'review' : 'safe') }, tl.mode === 'on' ? 'Sharing check-ins' : 'Nothing is sent')),
+    h('div', { class: 'card-body' }, tl.adminConfigured ? h('label', { style: 'display:flex;gap:14px;align-items:center;cursor:pointer' }, sw, h('div', null, h('b', null, 'Share anonymous check-ins'), h('div', { class: 'small muted' }, `Sent to ${tl.adminHost} so you get update notices and the developer can count installs.`)))
+      : h('div', { class: 'note' }, 'This build has no telemetry server configured, so ', h('b', null, 'nothing is ever sent'), '. Update checks only ask GitHub for the latest release.'),
+      h('div', { class: 'small muted', style: 'margin:16px 0 6px' }, 'The complete check-in, exactly as sent:'), h('pre', { class: 'note mono', style: 'white-space:pre-wrap;margin:0' }, info.payload ? JSON.stringify(info.payload, null, 2) : 'Loading…'),
+      h('div', { class: 'small muted', style: 'margin-top:10px' }, 'Never sent: file names, folder paths, sizes, your name or IP-linked identifiers.')),
+    tl.adminConfigured ? h('div', { style: 'margin-top:16px' }, h('button', { class: 'btn ghost sm', onclick: async () => { try { await post('/api/app/forget'); S.info = null; toast('Your record was deleted from the server.'); await refresh(true); } catch (x) { toast(x.message); } } }, 'Delete my data from the server')) : null);
+  const about = h('div', { class: 'card s12', style: 'flex-direction:row;align-items:center;gap:24px' }, h('img', { src: '/logo.svg', style: 'width:72px;height:72px;filter:drop-shadow(0 6px 12px rgba(20,120,80,.3))' }),
+    h('div', { style: 'flex:1' }, h('h2', null, 'Storage ' + info.version), h('div', { class: 'small muted', style: 'margin-top:4px' }, `Free & open source · MIT license · install ${info.installId}…`)),
+    h('a', { class: 'btn ghost', href: 'https://github.com/' + (u.repo || 'vimalsri318/storage-dashboard'), target: '_blank', rel: 'noopener' }, 'View on GitHub'));
+  root.append(h('div', { class: 'grid' }, updCard, privCard, about));
+  return root;
+}
+
 /* ---------- render loop ----------
  * Re-rendering used to replay the entry animation and jump the scroll, which looked like a page reload on every
  * click. Now the animation only runs on real navigation, and the scroll position is kept on in-page updates. */
 const PAGES = { overview: pageOverview, tasks: pageTasks, cleanup: pageCleanup, explorer: pageExplorer, history: pageHistory };
+PAGES.settings = pageSettings;
 function render(opts = {}) {
   if (!S.st) return;
   const y = window.scrollY;
   renderShell();
   const main = document.getElementById('main');
-  main.replaceChildren(PAGES[S.page]());
+  const page = PAGES[S.page](), sc = scanCard(S.page !== 'overview');
+  const bn = appBanners(); let anchor = page.children[0];
+  [...bn].reverse().forEach(b => anchor ? anchor.after(b) : page.append(b));
+  if (sc && page.children[0]) page.children[0].after(sc);
+  main.replaceChildren(page);
   main.classList.toggle('enter', !!opts.anim);
   if (opts.top) window.scrollTo(0, 0); else window.scrollTo(0, y);
   updateBar();
@@ -410,19 +548,26 @@ async function refresh(force) {
   try {
     S.st = await api('/api/state');
     const ids = new Set(sugs().map(s => s.id)); [...S.sel].forEach(i => { if (!ids.has(i)) S.sel.delete(i); });
+    const tids = new Set(tasks().map(t => t.id)); [...S.tsel].forEach(i => { if (!tids.has(i)) S.tsel.delete(i); });
     render();
   } catch (e) { /* server restarting */ }
 }
 let polling = false;
 async function poll() {
   if (polling) return; polling = true;
-  while (S.st?.scan.running) { await new Promise(r => setTimeout(r, 1500)); try { const s = await api('/api/status'); S.st.scan = s.scan; S.st.disk = s.disk; renderShell(); } catch { /* ignore */ } if (!S.st.scan.running) await refresh(true); }
+  while (S.st?.scan.running) {
+    await new Promise(r => setTimeout(r, 700));
+    try { const s = await api('/api/status'); const phaseChanged = S.st.scan.phase !== s.scan.phase; S.st.scan = s.scan; S.st.disk = s.disk; updateScanCard(); if (phaseChanged) renderShell(); } catch { /* ignore */ }
+    if (!S.st.scan.running) { await refresh(true); scanComplete(); }
+  }
   polling = false;
 }
 (async function init() {
   const h0 = location.hash.slice(1); if (PAGES[h0]) S.page = h0;
   await refresh(true);
   render({ anim: true });
+  consentModal();
+  setTimeout(() => { const sp = document.getElementById('splash'); if (sp) { sp.classList.add('out'); setTimeout(() => sp.remove(), 600); } }, 900);
   if (S.page === 'explorer') loadDir(S.st.home);
   poll();
   setInterval(async () => {
