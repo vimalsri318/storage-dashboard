@@ -1,0 +1,6 @@
+admin/data
+data
+build
+dist
+.git
+node_modules
