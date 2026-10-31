@@ -1,0 +1,19 @@
+{
+  "name": "storage-dashboard",
+  "version": "1.0.0",
+  "description": "A private disk-space dashboard for macOS: where your storage goes, plus a checklist of small cleanup tasks.",
+  "license": "MIT",
+  "author": "Storage Dashboard contributors",
+  "repository": { "type": "git", "url": "git+https://github.com/vimalsri318/storage-dashboard.git" },
+  "homepage": "https://github.com/vimalsri318/storage-dashboard#readme",
+  "bugs": { "url": "https://github.com/vimalsri318/storage-dashboard/issues" },
+  "keywords": ["macos", "disk-space", "storage", "cleanup", "dashboard", "developer-tools"],
+  "engines": { "node": ">=18.15" },
+  "scripts": {
+    "start": "node server.js --open",
+    "test": "node --test test/",
+    "build:mac": "./macos/build.sh",
+    "install:mac": "./macos/build.sh --install",
+    "admin": "node admin/server.js"
+  }
+}
