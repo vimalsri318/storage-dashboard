@@ -10,6 +10,14 @@ The checklist turns scan results into **small tasks you can finish in a click or
 | **manual** | Clean the Anaconda package cache · Run Homebrew cleanup · Empty the Trash | *Run it* / *Copy command* / *I did it* | Needs a tool's own command. *Run it* uses a fixed whitelist and reports the space actually freed (disk free before vs after). |
 | **open** | Tidy up Downloads (800 loose items) | *Open folder* / *Done* | A habit task; opens the Explorer on the folder. |
 
+## How you use it
+1. **Tick the circle** to *select* a task (nothing happens yet), or press the task's own button.
+2. Press **Run selected** (or the task button) — a **confirmation** lists exactly what will happen and how much it frees.
+3. Tasks that need a decision offer *Move to Trash* (undoable) or *Delete permanently*.
+4. Tasks Storage can't run for you (open a folder, a command without a runner) have *I did it* / *Done*; their circle just marks them done.
+
+> Early versions ran a task the moment you ticked its circle. That was a bug and is fixed — ticking only selects.
+
 ## Rules
 - Safe items ≥ 300 MB get their own task; smaller safe items are grouped.
 - Review items appear from 150 MB.

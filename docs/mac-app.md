@@ -15,6 +15,9 @@ Requirements: macOS 14+, Apple Silicon, Node.js on the Mac (the app starts the b
 - **Widget** – small and medium sizes (free-space ring, safe-to-clean, open tasks, next task). It reads `http://127.0.0.1:4747/api/widget` every ~15 min and falls back to the last good values.
 - App data lives in `~/Library/Application Support/Storage Dashboard` (via `STORAGE_DATA`).
 
+## Updates
+The menu-bar item and Dock icon show a badge when a new version exists, and macOS shows one notification per version. *Settings → Updates → Restart to update* downloads the release, verifies it (HTTPS allow-list, SHA-256, bundle id, version, code signature), swaps `Storage.app` and relaunches. Details: [fleet.md](fleet.md).
+
 ## Adding the widget
 Open the app once (this registers the extension), then right-click the desktop → **Edit Widgets…** → search "Storage". On macOS 14+ you can drag it to the desktop or Notification Center.
 
