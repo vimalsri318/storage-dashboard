@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     var infoItem = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
     var detailItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     var loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    var updateItem = NSMenuItem(title: "Update available — Restart to update", action: #selector(openSettings), keyEquivalent: "")
     var server: Process?
     var timer: Timer?
 
@@ -63,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let data = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Storage Dashboard").path
         try? FileManager.default.createDirectory(atPath: data, withIntermediateDirectories: true)
         let p = Process(); p.executableURL = URL(fileURLWithPath: node); p.arguments = [script]
-        var env = ProcessInfo.processInfo.environment; env["STORAGE_DATA"] = data
+        var env = ProcessInfo.processInfo.environment; env["STORAGE_DATA"] = data; env["STORAGE_APP_PATH"] = Bundle.main.bundlePath
         env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         p.environment = env
         p.standardOutput = FileHandle(forWritingAtPath: "/dev/null"); p.standardError = FileHandle(forWritingAtPath: "/dev/null")
@@ -117,7 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         if let b = statusItem.button { b.image = NSImage(systemSymbolName: "internaldrive", accessibilityDescription: "Storage"); b.imagePosition = .imageLeading; b.title = "" }
         let m = NSMenu()
         infoItem.isEnabled = false; detailItem.isEnabled = false
-        m.addItem(infoItem); m.addItem(detailItem); m.addItem(.separator())
+        updateItem.target = self; updateItem.isHidden = true
+        m.addItem(infoItem); m.addItem(detailItem); m.addItem(updateItem); m.addItem(.separator())
         m.addItem(withTitle: "Open Storage", action: #selector(openApp), keyEquivalent: "o").target = self
         m.addItem(withTitle: "Rescan Now", action: #selector(rescan), keyEquivalent: "r").target = self
         m.addItem(withTitle: "Open in Browser", action: #selector(openBrowser), keyEquivalent: "").target = self
@@ -134,14 +136,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             guard let d = data, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let free = j["free"] as? Double, let total = j["total"] as? Double else { return }
             let safe = (j["safeKB"] as? Double ?? 0) * 1024, tasks = j["openTasks"] as? Int ?? 0
+            let update = j["update"] as? [String: Any], newVersion = update?["version"] as? String, notice = j["notice"] as? String
             DispatchQueue.main.async {
                 let gb = { (b: Double) in String(format: b >= 1e11 ? "%.0f GB" : "%.1f GB", b / 1e9) }
                 self.statusItem.button?.title = " " + gb(free)
                 self.infoItem.title = "\(gb(free)) free of \(gb(total))"
                 self.detailItem.title = "\(gb(safe)) safe to clean · \(tasks) task\(tasks == 1 ? "" : "s")"
+                self.applyUpdateState(version: newVersion, notice: notice)
             }
         }.resume()
     }
+    // Update badge: menu item + Dock badge + one macOS notification per new version / notice.
+    func applyUpdateState(version: String?, notice: String?) {
+        updateItem.isHidden = version == nil
+        if let v = version { updateItem.title = "Update to \(v) — Restart to update" }
+        NSApp.dockTile.badgeLabel = version != nil ? "1" : nil
+        let d = UserDefaults.standard
+        if let v = version, d.string(forKey: "notifiedVersion") != v { d.set(v, forKey: "notifiedVersion"); notify("Storage \(v) is available", "Open Storage and choose Restart to update.") }
+        if let n = notice, d.string(forKey: "notifiedNotice") != n { d.set(n, forKey: "notifiedNotice"); notify("Storage", n) }
+    }
+    func notify(_ title: String, _ body: String) {
+        let esc = { (s: String) in s.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'") }
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", "display notification \"\(esc(body))\" with title \"\(esc(title))\""]
+        try? p.run()
+    }
+    @objc func openSettings() { showWindow(); web.evaluateJavaScript("go('settings')", completionHandler: nil) }
     @objc func openApp() { showWindow() }
     @objc func openBrowser() { NSWorkspace.shared.open(baseURL) }
     @objc func rescan() {
