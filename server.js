@@ -22,7 +22,7 @@ const HOME = os.homedir();
 const PORT = +process.env.PORT || 4747;
 const HOST = '127.0.0.1';
 const PUB = path.join(__dirname, 'public');
-const DATA = path.join(__dirname, 'data');
+const DATA = process.env.STORAGE_DATA || path.join(__dirname, 'data');
 const TOKEN = crypto.randomBytes(16).toString('hex');
 const MIN_KB = 20 * 1024; // keep tree entries >= 20 MB
 const SUGGEST_MIN_KB = 50 * 1024;
@@ -316,7 +316,7 @@ async function runScan() {
     const mapMs = Date.now() - scan.startedAt;
     scan.phase = 'Finding build folders'; scan.progress = 0.6;
     scan.phase = 'Measuring apps and system folders'; scan.progress = 0.57;
-    const sysPaths = ['/Applications', '/opt'];
+    const sysPaths = ['/Applications', '/opt', '/opt/anaconda3/pkgs', HOME + '/anaconda3/pkgs', HOME + '/miniconda3/pkgs'];
     const sysKb = await pool(sysPaths, 2, duKB);
     const sys = Object.fromEntries(sysPaths.map((p, i) => [p, sysKb[i] || 0]));
     scan.phase = 'Finding build folders'; scan.progress = 0.6;
@@ -329,7 +329,8 @@ async function runScan() {
     const skip = new Set();
     const fileSugs = await fileSuggestions(skip);
     const all = [...artSugs, ...ruleSugs, ...fileSugs].sort((a, b) => b.kb - a.kb);
-    state = { finishedAt: Date.now(), scanMs: Math.max(mapMs, 20000), tree, sys, suggestions: all };
+    let looseDownloads = 0; try { looseDownloads = (await fsp.readdir(path.join(HOME, 'Downloads'))).length; } catch { /* ignore */ }
+    state = { finishedAt: Date.now(), scanMs: Math.max(mapMs, 20000), tree, sys, looseDownloads, suggestions: all };
     writeJSON('scan.json', state);
     addHistory(true);
     scan = { ...scan, running: false, phase: 'Done', progress: 1 };
@@ -434,6 +435,66 @@ async function cleanOne(s, mode) {
   return { ok: true, how };
 }
 
+/* ---------- checklist (small tasks that actually free space) ---------- */
+const tasksState = Object.assign({ done: {}, kept: {}, completed: [] }, readJSON('tasks.json', {}));
+const saveTasks = () => writeJSON('tasks.json', tasksState);
+const firstExisting = list => list.find(p => { try { fs.accessSync(p); return true; } catch { return false; } });
+const CONDA = firstExisting(['/opt/anaconda3/bin/conda', HOME + '/anaconda3/bin/conda', HOME + '/miniconda3/bin/conda', '/opt/miniconda3/bin/conda']);
+const BREW = firstExisting(['/opt/homebrew/bin/brew', '/usr/local/bin/brew']);
+const RUNNABLE = {
+  conda: CONDA && { cmd: CONDA, args: ['clean', '--all', '-y'], label: 'conda clean --all' },
+  brew: BREW && { cmd: BREW, args: ['cleanup', '--prune=all'], label: 'brew cleanup' },
+  trash: { cmd: 'osascript', args: ['-e', 'tell application "Finder" to empty trash'], label: 'Empty Trash' },
+};
+const DAY = 864e5;
+
+function suggestionTitle(s) {
+  if (s.group === 'dev') return `Remove ${s.label} in ${s.title}`;
+  if (s.group === 'cache') return s.title.startsWith('App cache · ') ? `Clear ${s.title.slice(12)} cache` : `Clear ${s.title}`;
+  if (s.group === 'downloads') return `Delete installer “${s.title}”`;
+  if (s.group === 'large') return `Decide on “${s.title}”`;
+  return s.title;
+}
+function buildTasks() {
+  const out = [], sg = state.suggestions || [], now = Date.now();
+  const sum = a => a.reduce((x, y) => x + y.kb, 0);
+  const safeBig = sg.filter(s => s.risk === 'safe' && s.kb >= 300 * 1024 && s.method !== 'emptytrash');
+  const safeSmall = sg.filter(s => s.risk === 'safe' && s.kb < 300 * 1024 && s.method !== 'emptytrash');
+  safeBig.forEach(s => out.push({ id: 's:' + s.id, type: 'auto', sids: [s.id], title: suggestionTitle(s), detail: s.reason, undo: s.restore, kb: s.kb, effort: '1 click', risk: 'safe', path: s.path }));
+  if (safeSmall.length >= 2) out.push({ id: 'g:small:' + sha(safeSmall.map(s => s.id).join()), type: 'auto', sids: safeSmall.map(s => s.id), title: `Clear ${safeSmall.length} smaller caches`, detail: safeSmall.slice(0, 4).map(s => s.title.replace(/^App cache · /, '')).join(', ') + (safeSmall.length > 4 ? '…' : ''), undo: 'All of them rebuild themselves.', kb: sum(safeSmall), effort: '1 click', risk: 'safe' });
+  else safeSmall.forEach(s => out.push({ id: 's:' + s.id, type: 'auto', sids: [s.id], title: suggestionTitle(s), detail: s.reason, undo: s.restore, kb: s.kb, effort: '1 click', risk: 'safe', path: s.path }));
+  sg.filter(s => s.risk === 'review' && s.method !== 'emptytrash' && s.kb >= 150 * 1024 && !tasksState.kept['s:' + s.id])
+    .forEach(s => out.push({ id: 'r:' + s.id, type: 'review', sids: [s.id], title: suggestionTitle(s), detail: s.reason, undo: s.restore, kb: s.kb, effort: 'Your call', risk: 'review', path: s.path, method: s.method, group: s.group }));
+  // things only a command can clean
+  const sys = state.sys || {}, condaKB = Math.max(sys['/opt/anaconda3/pkgs'] || 0, sys[HOME + '/anaconda3/pkgs'] || 0, sys[HOME + '/miniconda3/pkgs'] || 0);
+  const manual = [];
+  if (RUNNABLE.conda && condaKB > 500 * 1024) manual.push({ id: 'm:conda', run: 'conda', title: 'Clean the Anaconda package cache', detail: 'Removes downloaded package archives and unused packages. Your environments keep working.', undo: 'Packages re-download when an install needs them.', kb: condaKB, command: 'conda clean --all -y' });
+  if (RUNNABLE.brew) manual.push({ id: 'm:brew', run: 'brew', title: 'Run Homebrew cleanup', detail: 'Deletes old versions of installed formulas and stale downloads.', undo: 'Only the latest installed versions remain, which is what brew uses anyway.', kb: 0, command: 'brew cleanup --prune=all' });
+  const trashed = tasksState.trashedKB || 0;
+  if (trashed > 50 * 1024) manual.push({ id: 'm:trash', run: 'trash', title: 'Empty the Trash', detail: 'Items you moved to Trash with this app only free space once the Trash is emptied.', undo: 'Permanent — you cannot get them back afterwards.', kb: trashed, command: '' });
+  manual.forEach(m => { const d = tasksState.done[m.id]; if (d && now - d < 14 * DAY) return; if (tasksState.kept[m.id]) return; out.push({ ...m, type: 'manual', effort: m.run ? '1 click' : '1 min', risk: 'safe' }); });
+  const looseDownloads = state.looseDownloads || 0;
+  if (looseDownloads > 200 && !(tasksState.done['h:downloads'] && now - tasksState.done['h:downloads'] < 14 * DAY))
+    out.push({ id: 'h:downloads', type: 'open', title: `Tidy up Downloads (${looseDownloads} loose items)`, detail: 'Delete what you no longer need and move the rest into folders. Open it in the Explorer to see the biggest items first.', undo: 'Items you remove go to the Trash.', kb: 0, effort: '5 min', risk: 'review', path: HOME + '/Downloads' });
+  out.sort((a, b) => (a.risk === 'safe' ? 0 : 1) - (b.risk === 'safe' ? 0 : 1) || b.kb - a.kb);
+  return out;
+}
+function markCompleted(id, title, kb) {
+  tasksState.completed.push({ id, title, kb, t: Date.now() }); tasksState.completed = tasksState.completed.slice(-200);
+  tasksState.done[id] = Date.now(); saveTasks();
+}
+async function runRunnable(key) {
+  const r = RUNNABLE[key]; if (!r) throw new Error('Not available on this Mac');
+  const before = disk().free;
+  const env = { ...process.env, PATH: `${path.dirname(r.cmd)}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin` };
+  const { err, out } = await new Promise(res => execFile(r.cmd, r.args, { env, timeout: 15 * 60e3, maxBuffer: 8 << 20 }, (err, so, se) => res({ err, out: (so + '\n' + se).trim() })));
+  if (err && key !== 'brew') throw new Error((out.split('\n').slice(-3).join(' ') || err.message).slice(0, 300));
+  await new Promise(r2 => setTimeout(r2, 1200));
+  const freedKB = Math.max(0, Math.round((disk().free - before) / 1024));
+  if (key === 'trash') tasksState.trashedKB = 0;
+  return { freedKB, output: out.split('\n').slice(-6).join('\n') };
+}
+
 /* ---------- HTTP ---------- */
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
 const send = (res, code, body, type = 'application/json') => {
@@ -450,6 +511,7 @@ function fullState() {
   return {
     disk: disk(), scan: { ...scan, finishedAt: state.finishedAt }, categories: ov.categories, top: ov.top,
     suggestions: state.suggestions, history, actions: actions.slice(-200), home: HOME,
+    tasks: buildTasks(), completed: tasksState.completed.slice(-60).reverse(), keptCount: Object.keys(tasksState.kept).length,
   };
 }
 
@@ -480,7 +542,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/scan') { runScan(); return send(res, 200, { started: true }); }
 
     if (req.method === 'POST' && url.pathname === '/api/clean') {
-      const { ids = [], mode = 'trash' } = await readBody(req);
+      const { ids = [], mode = 'trash', taskId = null, taskTitle = '' } = await readBody(req);
       const byId = new Map(state.suggestions.map(s => [s.id, s]));
       const results = []; let freed = 0;
       for (const id of ids) {
@@ -492,10 +554,12 @@ const server = http.createServer(async (req, res) => {
           dropFromTree(s.path, s.kb);
           state.suggestions = state.suggestions.filter(x => x.id !== id);
           const how = r.how || 'rm';
-          if (how === 'rm') freed += s.kb;
+          if (how === 'rm') freed += s.kb; else if (how === 'trash') tasksState.trashedKB = (tasksState.trashedKB || 0) + s.kb;
           actions.push({ t: Date.now(), title: s.title, label: s.label, path: s.path, kb: s.kb, how });
         } catch (e) { results.push({ id, ok: false, error: e.code === 'EPERM' || e.code === 'EACCES' ? 'Permission denied (macOS blocked it)' : e.message }); }
       }
+      const okCount = results.filter(r => r.ok).length;
+      if (taskId && okCount && okCount === results.length) markCompleted(taskId, String(taskTitle).slice(0, 120), freed || ids.reduce((a, i) => a + (byId.get(i)?.kb || 0), 0)); else saveTasks();
       writeJSON('scan.json', state); writeJSON('actions.json', actions); addHistory(true);
       return send(res, 200, { results, freedKB: freed, disk: disk() });
     }
@@ -518,6 +582,30 @@ const server = http.createServer(async (req, res) => {
       const { path: p } = await readBody(req); const rp = path.resolve(p);
       if (rp !== HOME && !rp.startsWith(HOME + '/')) return send(res, 400, { error: 'Outside your home folder' });
       execFile('open', ['-R', rp], () => {}); return send(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/widget') {
+      const d = disk(), tasks = buildTasks(), sg = state.suggestions || [];
+      const safeKB = sg.filter(s => s.risk === 'safe').reduce((a, s) => a + s.kb, 0);
+      return send(res, 200, { free: d.free, total: d.total, used: d.used, safeKB, openTasks: tasks.length, topTask: tasks[0] ? { title: tasks[0].title, kb: tasks[0].kb } : null, scannedAt: state.finishedAt, updated: Date.now() });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/task') {
+      const { id, action, title = '', kb = 0 } = await readBody(req);
+      if (typeof id !== 'string' || !/^[a-z]:[\w:.-]{1,60}$/i.test(id)) return send(res, 400, { error: 'bad id' });
+      if (action === 'done') markCompleted(id, String(title).slice(0, 120), +kb || 0);
+      else if (action === 'keep') { tasksState.kept[id] = Date.now(); saveTasks(); }
+      else if (action === 'reset') { delete tasksState.kept[id]; delete tasksState.done[id]; saveTasks(); }
+      else return send(res, 400, { error: 'bad action' });
+      return send(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/run') {
+      const { key, taskId, title = '' } = await readBody(req);
+      try {
+        const r = await runRunnable(key);
+        actions.push({ t: Date.now(), title: String(title).slice(0, 120) || key, label: 'Command', path: RUNNABLE[key].label, kb: r.freedKB, how: 'rm' });
+        markCompleted(taskId || 'm:' + key, String(title).slice(0, 120) || key, r.freedKB);
+        writeJSON('actions.json', actions); addHistory(true);
+        return send(res, 200, { ...r, disk: disk() });
+      } catch (e) { return send(res, 400, { error: e.message }); }
     }
     return send(res, 404, { error: 'not found' });
   } catch (e) { send(res, 500, { error: String(e && e.message || e) }); }
