@@ -27,6 +27,8 @@ const TOKEN = crypto.randomBytes(16).toString('hex');
 const MIN_KB = 20 * 1024; // keep tree entries >= 20 MB
 const SUGGEST_MIN_KB = 50 * 1024;
 fs.mkdirSync(DATA, { recursive: true });
+const VERSION = require('./package.json').version;
+const updater = require('./lib/update').create({ dataDir: DATA, version: VERSION, rootDir: __dirname, appPath: process.env.STORAGE_APP_PATH || '' });
 
 /* ---------- tiny helpers ---------- */
 const readJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(path.join(DATA, f), 'utf8')); } catch { return d; } };
@@ -511,7 +513,7 @@ function fullState() {
   return {
     disk: disk(), scan: { ...scan, finishedAt: state.finishedAt }, categories: ov.categories, top: ov.top,
     suggestions: state.suggestions, history, actions: actions.slice(-200), home: HOME,
-    tasks: buildTasks(), completed: tasksState.completed.slice(-60).reverse(), keptCount: Object.keys(tasksState.kept).length,
+    app: updater.state(), tasks: buildTasks(), completed: tasksState.completed.slice(-60).reverse(), keptCount: Object.keys(tasksState.kept).length,
   };
 }
 
@@ -583,10 +585,19 @@ const server = http.createServer(async (req, res) => {
       if (rp !== HOME && !rp.startsWith(HOME + '/')) return send(res, 400, { error: 'Outside your home folder' });
       execFile('open', ['-R', rp], () => {}); return send(res, 200, { ok: true });
     }
+    if (req.method === 'GET' && url.pathname === '/api/app') return send(res, 200, { ...updater.state(), payload: await updater.payload() });
+    if (req.method === 'POST' && url.pathname === '/api/app/telemetry') {
+      const { mode } = await readBody(req);
+      try { return send(res, 200, await updater.setTelemetry(mode)); } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (req.method === 'POST' && url.pathname === '/api/app/check') return send(res, 200, await updater.check({ force: true }));
+    if (req.method === 'POST' && url.pathname === '/api/app/forget') { try { return send(res, 200, await updater.forget()); } catch (e) { return send(res, 400, { error: e.message }); } }
+    if (req.method === 'POST' && url.pathname === '/api/app/install') { try { return send(res, 200, await updater.install()); } catch (e) { return send(res, 400, { error: e.message }); } }
     if (req.method === 'GET' && url.pathname === '/api/widget') {
       const d = disk(), tasks = buildTasks(), sg = state.suggestions || [];
       const safeKB = sg.filter(s => s.risk === 'safe').reduce((a, s) => a + s.kb, 0);
-      return send(res, 200, { free: d.free, total: d.total, used: d.used, safeKB, openTasks: tasks.length, topTask: tasks[0] ? { title: tasks[0].title, kb: tasks[0].kb } : null, scannedAt: state.finishedAt, updated: Date.now() });
+      const ap = updater.state(), note = ap.notices[0];
+      return send(res, 200, { version: VERSION, update: ap.update.available ? { version: ap.update.latest.version, mandatory: ap.update.mandatory } : null, notice: note ? note.message : null, free: d.free, total: d.total, used: d.used, safeKB, openTasks: tasks.length, topTask: tasks[0] ? { title: tasks[0].title, kb: tasks[0].kb } : null, scannedAt: state.finishedAt, updated: Date.now() });
     }
     if (req.method === 'POST' && url.pathname === '/api/task') {
       const { id, action, title = '', kb = 0 } = await readBody(req);
@@ -615,6 +626,8 @@ server.listen(PORT, HOST, () => {
   console.log(`Storage Dashboard running at http://${HOST}:${PORT}`);
   addHistory(true);
   setInterval(() => addHistory(false), 15 * 60e3);
+  setTimeout(() => updater.check().catch(() => {}), 15e3);
+  setInterval(() => updater.check().catch(() => {}), 6 * 36e5);
   if (!state.finishedAt || Date.now() - state.finishedAt > 12 * 3600e3) runScan();
   if (process.argv.includes('--open')) execFile('open', [`http://${HOST}:${PORT}`], () => {});
 });
